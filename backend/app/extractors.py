@@ -66,10 +66,10 @@ async def extract_from_image(content: bytes, content_type: str) -> ExtractedRece
         b64 = base64.b64encode(content).decode()
         async with httpx.AsyncClient(timeout=60) as client:
             r = await client.post(
-                f"{os.getenv('AI_BASE_URL', 'https://api.openai.com/v1')}/chat/completions",
+                f"{os.getenv('AI_BASE_URL', 'https://api.groq.com/openai/v1')}/chat/completions",
                 headers={"Authorization": f"Bearer {key}"},
                 json={
-                    "model": os.getenv("AI_MODEL", "gpt-4o-mini"),
+                    "model": os.getenv("AI_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"),
                     "messages": [{
                         "role": "user",
                         "content": [

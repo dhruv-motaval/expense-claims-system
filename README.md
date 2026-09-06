@@ -127,14 +127,17 @@ from 12 Aug, and Vikram holds a draft of the same receipt reworded ("Uber Techno
 ## AI usage
 
 - **What**: receipt OCR/interpretation. `app/extractors.py` calls an OpenAI-compatible
-  `/chat/completions` endpoint with the receipt image and a strict JSON prompt (spec §17).
+  `/chat/completions` endpoint (defaults to Groq's free tier; any compatible provider works)
+  with the receipt image and a strict JSON prompt (spec §17).
   The response is validated with Pydantic; on any failure the user is told to enter the
   claim manually. Text extraction is pure regex/date parsing — no AI needed.
 - **Where**: `backend/app/extractors.py::extract_from_image`, wired in
   `backend/app/services.py::extract_upload`.
 - **Never used for**: permissions, approval, payment, status transitions, spend math,
   duplicate enforcement — all deterministic backend code.
-- To enable: set `AI_API_KEY` (and optionally `AI_BASE_URL`, `AI_MODEL`) in `backend/.env`.
+- To enable: set `AI_API_KEY` (a free Groq key from console.groq.com; optionally
+  `AI_BASE_URL`, `AI_MODEL` — must be a vision-capable model such as
+  `meta-llama/llama-4-scout-17b-16e-instruct`) in `backend/.env`.
 
 ## Tests
 
