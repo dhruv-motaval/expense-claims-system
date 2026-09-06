@@ -10,3 +10,5 @@ storage/receipts/*
 dev.db
 tmp.db
 *.db
+
+frontend/tsconfig.tsbuildinfo
