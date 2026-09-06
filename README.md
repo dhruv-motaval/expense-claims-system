@@ -124,6 +124,18 @@ from 12 Aug, and Vikram holds a draft of the same receipt reworded ("Uber Techno
   Image upload requires `AI_API_KEY`; without it the UI tells the user to enter the claim
   manually (spec's offline strategy).
 
+### Things the spec did not tell us (our calls)
+
+- **Seed dates are relative to the current month** (not hard-coded August) so dashboards
+  always show live data whenever the demo is run.
+- **Duplicate scan compares claims, not raw receipts** — the claim holds the reviewed truth,
+  so reworded duplicates are caught against what was actually approved/paid.
+- **A manager also cannot reject their own claim** — same self-dealing risk as approval.
+- **Empty rejection reasons are refused** — an employee deserves to know why.
+- **Finance endpoints are FINANCE-role-only** — company-wide spend is sensitive data.
+- **Claim numbers** are `CLM-<1000 + id>` — short, unique, stable.
+- **Rejected → draft is explicit** ("return to draft" action) so the audit trail shows the loop.
+
 ## AI usage
 
 - **What**: receipt OCR/interpretation. `app/extractors.py` calls Google's Gemini
@@ -148,16 +160,18 @@ cd backend
 pytest
 ```
 
-11 tests cover the spec's §46 list: claim creation, text extraction (clean + messy receipts),
-editable extraction, self-approval block, wrong-manager block, paid-is-terminal, duplicate
-detection despite rewording, double-payment block, near-limit and over-limit math, and the
-AI-unavailable fallback. Tests run on SQLite in-memory — no Postgres needed.
+22 tests cover the spec's §46 business rules (claim creation, extraction incl. messy
+receipts, editable drafts, self-approval block, wrong-manager block, paid-is-terminal,
+duplicate detection despite rewording, double-payment block, near/over-limit math,
+AI-unavailable fallback) plus workflow tests: full lifecycle, IDOR between roles,
+validation errors, rejection loop, role matrix. Tests run on SQLite — no Postgres needed.
 
-## What would be built next
+## If I had another week
 
-- Email/Slack notifications on submit/approve/pay
-- Per-company policy config (approval chains, category limits)
-- Multi-currency with FX rates
-- Delegated approvals (out-of-office)
-- Image-hash duplicate matching for photographed receipts
-- Real auth (hashed passwords, persistent sessions), CSV export, ERP/accounting export
+1. **Deploy it** (Vercel + Render + Neon free tiers) — the reviewers prefer a URL over
+   running locally; only config changes needed.
+2. **Real auth** — hashed passwords, persistent sessions, password reset.
+3. **Image-hash duplicate matching** — catch the same photo resubmitted, not just reworded text.
+4. **Notifications** — email/Slack on submit, approval, rejection, payment.
+5. **Delegated approvals** — manager out-of-office chains.
+6. **CSV/accounting export** for Finance, multi-currency with FX rates.
