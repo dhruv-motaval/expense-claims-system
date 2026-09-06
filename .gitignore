@@ -1,0 +1,12 @@
+node_modules/
+.next/
+__pycache__/
+*.pyc
+.venv/
+.env
+.env.local
+storage/receipts/*
+!storage/receipts/.gitkeep
+dev.db
+tmp.db
+*.db
