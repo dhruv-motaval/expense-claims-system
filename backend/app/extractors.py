@@ -64,23 +64,24 @@ async def extract_from_image(content: bytes, content_type: str) -> ExtractedRece
         raise ExtractionError("AI extraction is not configured. Enter the claim manually.")
     try:
         b64 = base64.b64encode(content).decode()
-        async with httpx.AsyncClient(timeout=60) as client:
+        # ponytail: native Gemini generateContent — the OpenAI-compat layer hangs on current models
+        async with httpx.AsyncClient(timeout=120) as client:
             r = await client.post(
-                f"{os.getenv('AI_BASE_URL', 'https://api.groq.com/openai/v1')}/chat/completions",
-                headers={"Authorization": f"Bearer {key}"},
+                f"https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{os.getenv('AI_MODEL', 'gemini-3.6-flash')}:generateContent",
+                params={"key": key},
                 json={
-                    "model": os.getenv("AI_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"),
-                    "messages": [{
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": EXTRACT_PROMPT},
-                            {"type": "image_url", "image_url": {"url": f"data:{content_type};base64,{b64}"}},
+                    "contents": [{
+                        "parts": [
+                            {"text": EXTRACT_PROMPT},
+                            {"inline_data": {"mime_type": content_type, "data": b64}},
                         ],
                     }],
                 },
             )
             r.raise_for_status()
-            answer = r.json()["choices"][0]["message"]["content"]
+            parts = r.json()["candidates"][0]["content"]["parts"]
+            answer = next((p.get("text") for p in parts if p.get("text")), "")
         answer = re.sub(r"^```(?:json)?|```$", "", answer.strip(), flags=re.M).strip()
         return ExtractedReceipt(**json.loads(answer))
     except ExtractionError:

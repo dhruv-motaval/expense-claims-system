@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/auth";
 import { ErrorBox, Shell } from "@/components/ui";
 import { inr } from "@/lib/format";
@@ -18,12 +18,21 @@ export default function NewClaimPage() {
   const router = useRouter();
   const [text, setText] = useState("");
   const [file, setFile] = useState<File | null>(null);
+  const [preview, setPreview] = useState("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [form, setForm] = useState<any>(null);
   const [matches, setMatches] = useState<Match[]>([]);
   const [override, setOverride] = useState(false);
   const [receiptId, setReceiptId] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!file) { setPreview(""); return; }
+    const url = URL.createObjectURL(file);
+    setPreview(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
 
   async function extractText() {
     setBusy("extract"); setError(""); setMatches([]); setOverride(false);
@@ -111,6 +120,26 @@ export default function NewClaimPage() {
               onChange={(e) => setFile(e.target.files?.[0] || null)}
               className="block text-sm"
             />
+            {file && (
+              <div className="flex items-center gap-3 border rounded p-2 bg-gray-50">
+                {preview && (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={preview} alt="Receipt preview" className="h-14 w-14 object-cover rounded border" />
+                )}
+                <div className="flex-1 min-w-0 text-sm">
+                  <p className="truncate font-medium">{file.name}</p>
+                  <p className="text-xs text-gray-500">{(file.size / 1024).toFixed(0)} KB</p>
+                </div>
+                <button
+                  onClick={() => { setFile(null); setPreview(""); if (fileInputRef.current) fileInputRef.current.value = ""; }}
+                  disabled={busy === "extract"}
+                  aria-label="Remove selected file"
+                  className="text-red-600 hover:text-red-700 text-sm font-medium px-2 py-1 rounded hover:bg-red-50 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-red-400"
+                >
+                  Remove
+                </button>
+              </div>
+            )}
             <button
               onClick={uploadImage} disabled={busy === "extract" || !file}
               className="bg-blue-600 text-white rounded px-4 py-2 text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
