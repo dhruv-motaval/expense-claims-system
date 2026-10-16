@@ -104,13 +104,15 @@ class S3Storage(StorageBackend):
                  key_prefix: str = 'receipts'):
         try:
             import boto3
+            from botocore.config import Config
         except ImportError:
             raise RuntimeError('boto3 is required for S3 storage backend')
         self.bucket_name = bucket_name
         self.region = region
         self.sse = sse
         self.key_prefix = key_prefix.strip('/')
-        self.s3 = boto3.client('s3', region_name=region)
+        self.s3 = boto3.client('s3', region_name=region,
+                               config=boto3.session.Config(signature_version='s3v4'))
 
     def _make_key(self, ext: str) -> str:
         unique = f'{uuid.uuid4().hex}.{ext.lstrip(".")}'
