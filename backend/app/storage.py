@@ -28,6 +28,10 @@ class StorageBackend(ABC):
         pass
 
     @abstractmethod
+    def upload_artifact(self, receipt_id: int, suffix: str, content: bytes, content_type: str) -> StoredObject:
+        """Store a processing artifact under the receipt's key space, e.g. pages/page-001.jpg."""
+
+    @abstractmethod
     def get_object(self, key: str) -> bytes:
         pass
 
@@ -79,6 +83,15 @@ class LocalStorage(StorageBackend):
         with open(full_path, 'wb') as f:
             f.write(content)
         return StoredObject(key=key)
+
+    def upload_artifact(self, receipt_id: int, suffix: str, content: bytes, content_type: str) -> StoredObject:
+        suffix = suffix.lstrip('/')
+        key = f'receipts/{receipt_id}/{suffix}'
+        full_path = self.storage_dir / key
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(full_path, 'wb') as f:
+            f.write(content)
+        return StoredObject(key=key, content_type=content_type, size=len(content))
 
     def get_object(self, key: str) -> bytes:
         full_path = self.storage_dir / key
@@ -141,6 +154,13 @@ class S3Storage(StorageBackend):
         extra_args = {'ContentType': 'application/json', 'ServerSideEncryption': self.sse}
         self.s3.put_object(Bucket=self.bucket_name, Key=key, Body=content, **extra_args)
         return StoredObject(key=key)
+
+    def upload_artifact(self, receipt_id: int, suffix: str, content: bytes, content_type: str) -> StoredObject:
+        suffix = suffix.lstrip('/')
+        key = f'{self.key_prefix}/{receipt_id}/{suffix}'
+        extra_args = {'ContentType': content_type, 'ServerSideEncryption': self.sse}
+        self.s3.put_object(Bucket=self.bucket_name, Key=key, Body=content, **extra_args)
+        return StoredObject(key=key, content_type=content_type, size=len(content))
 
     def get_object(self, key: str) -> bytes:
         try:

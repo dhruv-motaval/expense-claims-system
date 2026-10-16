@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
-import { api, useMe } from "@/lib/auth";
+import { api, getToken, useMe } from "@/lib/auth";
 import { inr, fmtDate, fmtDateTime } from "@/lib/format";
 import { ErrorBox, Shell, StatusBadge } from "@/components/ui";
 
@@ -27,9 +27,29 @@ export default function ClaimDetailPage() {
   const [busy, setBusy] = useState("");
   const [rejecting, setRejecting] = useState(false);
   const [reason, setReason] = useState("");
+  const [pageUrls, setPageUrls] = useState<string[]>([]);
 
   const load = useCallback(() => {
-    api(`/claims/${id}`).then(setClaim).catch((e) => setError(e.message));
+    api(`/claims/${id}`).then((c) => {
+      setClaim(c);
+      // PDF receipts: load rendered page previews (authorized; presigned URLs
+      // in S3 mode, app-proxied bytes in local mode).
+      if (c.receipt?.s3_image_key && c.receipt.s3_image_key.endsWith(".pdf")) {
+        api(`/receipts/pages/${id}`)
+          .then(async (d: any) => {
+            const urls: string[] = [];
+            for (const p of d.pages || []) {
+              const isPresigned = p.url.startsWith("http");
+              const res = await fetch(p.url, isPresigned ? {} : {
+                headers: { Authorization: `Bearer ${getToken()}` },
+              });
+              if (res.ok) urls.push(URL.createObjectURL(await res.blob()));
+            }
+            setPageUrls(urls);
+          })
+          .catch(() => setPageUrls([]));
+      }
+    }).catch((e) => setError(e.message));
   }, [id]);
   useEffect(load, [load]);
 
@@ -80,6 +100,18 @@ export default function ClaimDetailPage() {
           <div className="col-span-2">
             <p className="text-gray-500 mb-1">Original receipt</p>
             <pre className="bg-gray-50 border rounded p-2 text-xs whitespace-pre-wrap">{claim.receipt.original_text}</pre>
+          </div>
+        )}
+        {pageUrls.length > 0 && (
+          <div className="col-span-2">
+            <p className="text-gray-500 mb-1">Receipt pages (PDF preview)</p>
+            <div className="flex flex-wrap gap-2">
+              {pageUrls.map((u, i) => (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img key={i} src={u} alt={`Receipt page ${i + 1}`}
+                  className="h-40 w-auto rounded border" />
+              ))}
+            </div>
           </div>
         )}
       </div>

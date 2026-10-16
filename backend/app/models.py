@@ -68,6 +68,7 @@ class Receipt(Base):
     s3_image_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
     s3_source_text_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
     s3_extracted_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    s3_pages_keys: Mapped[list | None] = mapped_column(JSON, nullable=True)
     merchant: Mapped[str | None] = mapped_column(String(200), nullable=True)
     receipt_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)

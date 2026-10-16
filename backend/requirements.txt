@@ -11,3 +11,5 @@ pytest>=8
 boto3>=1.34
 pymupdf>=1.24.10
 pillow>=10.4.0
+# optional local OCR for scanned PDFs (requires Tesseract binary on PATH)
+# pytesseract>=0.3.10

@@ -175,3 +175,21 @@ validation errors, rejection loop, role matrix. Tests run on SQLite — no Postg
 4. **Notifications** — email/Slack on submit, approval, rejection, payment.
 5. **Delegated approvals** — manager out-of-office chains.
 6. **CSV/accounting export** for Finance, multi-currency with FX rates.
+
+
+## PDF Receipts and S3 Artifacts
+
+PDF, JPEG, PNG and WebP receipts are accepted by the same upload endpoint. PDFs are validated by signature, limited to 10 MB and PDF_MAX_PAGES pages, and processed locally with PyMuPDF: embedded text is extracted and pages are rendered to compressed JPEGs (PDF_RENDER_DPI, PDF_JPEG_QUALITY). If a PDF has no embedded text, an optional local OCR fallback (Tesseract via pytesseract) can be enabled by installing the optional dependencies in backend/app/ocr.py - normal operation and tests never require it.
+
+PDF receipts are stored under a per-receipt key space in the configured storage backend:
+
+    receipts/<receipt-id>/original.pdf          (original preserved byte-for-byte)
+    receipts/<receipt-id>/pages/page-001.jpg    (rendered, compressed pages)
+    receipts/<receipt-id>/ocr/source.txt        (embedded/OCR text snapshot)
+    receipts/<receipt-id>/extracted/receipt.json
+
+For image/text receipts the original is stored under the flat receipts/<uuid>.<ext> layout. All objects are private; presigned URLs use PRESIGNED_URL_EXPIRES (default 300 s) and are generated only after receipt authorization. If any artifact upload or the DB commit fails, every object uploaded during that operation is deleted and the upload is reported as failed - there is no silent local fallback.
+
+Merchant extraction is deterministic: date-only, time-only and pure-amount lines are skipped when choosing the merchant name (first plausible header line wins, falling back to the first line for receipts that contain only dates/amounts).
+
+Run migrations with alembic upgrade head (two storage migrations: 0df2dc126555 adds receipt ownership + S3 key columns, 45cc8add3d05 adds s3_pages_keys JSON). Run tests with DATABASE_URL=sqlite:///:memory: python -m pytest -v - they force local storage and never require AWS credentials. QA live runs should set S3_KEY_PREFIX=qa-temp/<run-id> so cleanup can delete exactly that prefix.
