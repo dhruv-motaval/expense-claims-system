@@ -54,15 +54,20 @@ class User(Base):
 
     manager = relationship("User", remote_side="User.id", foreign_keys=[manager_id])
     claims = relationship("Claim", back_populates="user", foreign_keys="Claim.user_id")
+    receipts = relationship("Receipt", back_populates="user")
 
 
 class Receipt(Base):
     __tablename__ = "receipts"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     source_type: Mapped[str] = mapped_column(String(20), default=SourceType.TEXT.value)
     original_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     image_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    s3_image_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    s3_source_text_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    s3_extracted_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
     merchant: Mapped[str | None] = mapped_column(String(200), nullable=True)
     receipt_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
@@ -72,6 +77,7 @@ class Receipt(Base):
     content_hash: Mapped[str] = mapped_column(String(64), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
+    user = relationship("User", back_populates="receipts")
 
 class Claim(Base):
     __tablename__ = "claims"

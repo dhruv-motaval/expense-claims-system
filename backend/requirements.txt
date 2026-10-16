@@ -8,3 +8,6 @@ python-multipart>=0.0.9
 httpx>=0.27
 python-dotenv>=1.0
 pytest>=8
+boto3>=1.34
+pymupdf>=1.24.10
+pillow>=10.4.0
