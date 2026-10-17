@@ -179,7 +179,8 @@ async def extract_upload(db: Session, user: User, file: UploadFile) -> dict:
         r = await extract_from_image(content, content_type)
     except ExtractionError as e:
         raise BusinessRuleError(str(e))
-    receipt = _store_artifacts(db, user, r, image_content=content, image_content_type=content_type)
+    receipt = _store_artifacts(db, user, r, image_content=content, image_content_type=content_type,
+                               original_filename=filename)
     return {"receipt_id": receipt.id,
             "duplicate_matches": _duplicates(db, r), **r.model_dump(mode="json")}
 
@@ -232,7 +233,8 @@ async def _extract_pdf_upload(db: Session, user: User, content: bytes, filename:
         raise
     except ValueError as e:
         raise BusinessRuleError(str(e))
-    receipt = _store_artifacts(db, user, r, pdf_content=content, pdf_result=pdf_result)
+    receipt = _store_artifacts(db, user, r, pdf_content=content, pdf_result=pdf_result,
+                               original_filename=filename)
     return {"receipt_id": receipt.id,
             "duplicate_matches": _duplicates(db, r), **r.model_dump(mode="json")}
 
@@ -243,35 +245,77 @@ def _duplicates(db: Session, r: ExtractedReceipt) -> list[dict]:
              "amount": r.amount, "description": r.description})]
 
 
+def _duplicates(db: Session, r: ExtractedReceipt) -> list[dict]:
+    return [match_dict(m) for m in find_duplicates(
+        db, {"merchant": r.merchant, "date": r.date,
+             "amount": r.amount, "description": r.description})]
+
+
+def _ext_for(content_type: str) -> str:
+    return {
+        "application/pdf": "pdf",
+        "image/jpeg": "jpg",
+        "image/png": "png",
+        "image/webp": "webp",
+    }.get(content_type, "bin")
+
+
 def _store_artifacts(db: Session, user: User, extracted: ExtractedReceipt,
                      original_text: str | None = None,
                      image_content: bytes | None = None,
                      image_content_type: str | None = None,
+                     original_filename: str | None = None,
                      pdf_content: bytes | None = None,
                      pdf_result=None) -> Receipt:
-    """Persist receipt artifacts through the storage backend and record the receipt row.
+    """Store the canonical original receipt file in S3 and the structured
+    extraction result in PostgreSQL.
 
-    PDF receipts are stored under a per-receipt key space:
-        receipts/<receipt-id>/original.pdf
-        receipts/<receipt-id>/pages/page-001.jpg
-        receipts/<receipt-id>/ocr/source.txt
-        receipts/<receipt-id>/extracted/receipt.json
+    New records keep ONE private S3 object under a per-receipt key space:
 
-    Image/text receipts keep the existing flat unique-key layout.
+        receipts/<receipt-id>/original.pdf   (or original.jpg/png/webp by type)
 
-    The receipt row is flushed first to obtain the id used in artifact keys.
+    Extracted structured data, file metadata (filename, content type, size,
+    sha256 checksum), processing status and workflow data live in PostgreSQL.
+    Page images, OCR text and extracted JSON are rendered/parsed transiently
+    in memory for extraction; they are NOT persisted to S3 for new uploads
+    (legacy receipts that already have those artifacts keep working).
+
+    The receipt row is flushed first to obtain the id used in the object key.
     If any later step fails, every object uploaded during this call is deleted
     best-effort and the transaction is rolled back - no silent fallback, no
-    orphaned objects, and no DB record without its artifacts.
+    orphaned objects, and no DB record without its canonical file.
     """
+    import hashlib
+
     storage = get_storage()
     is_s3 = db_config.STORAGE_BACKEND == "s3"
     uploaded_keys: list[str] = []
 
+    if pdf_content is not None:
+        content = pdf_content
+        content_type = "application/pdf"
+        ext = "pdf"
+        source_type = "PDF"
+    elif image_content is not None:
+        content = image_content
+        sniffed = _sniff_image_type(image_content)
+        content_type = sniffed or image_content_type or "image/jpeg"
+        ext = _ext_for(content_type)
+        source_type = SourceType.IMAGE.value
+    else:
+        content = None
+        ext = ""
+        content_type = None
+        source_type = SourceType.TEXT.value
+
+    checksum = hashlib.sha256(content).hexdigest() if content else None
+    extracted_payload = {**extracted.model_dump(mode="json"),
+                         "extraction_status": "completed" if extracted.amount is not None else "partial"}
+    if pdf_result is not None:
+        extracted_payload["page_count"] = len(pdf_result.page_images or [])
     r = Receipt(
         user_id=user.id,
-        source_type="PDF" if pdf_content is not None else (
-            SourceType.IMAGE.value if image_content is not None else SourceType.TEXT.value),
+        source_type=source_type,
         original_text=original_text,
         merchant=extracted.merchant,
         receipt_date=extracted.date,
@@ -281,9 +325,15 @@ def _store_artifacts(db: Session, user: User, extracted: ExtractedReceipt,
         normalized_hash=content_hash(extracted.raw_text),
         content_hash=fingerprint(extracted.merchant, extracted.date, extracted.amount,
                                  extracted.currency, extracted.description),
+        original_filename=original_filename,
+        content_type=content_type,
+        file_size=len(content) if content else None,
+        checksum_sha256=checksum,
+        extracted_data=extracted_payload,
+        processing_status="completed",
     )
     db.add(r)
-    db.flush()  # assign r.id for artifact keys
+    db.flush()  # assign r.id for the canonical object key
 
     def _cleanup():
         for k in uploaded_keys:
@@ -294,45 +344,16 @@ def _store_artifacts(db: Session, user: User, extracted: ExtractedReceipt,
         db.rollback()
 
     try:
-        if pdf_content is not None:
-            obj = storage.upload_artifact(r.id, "original.pdf", pdf_content, "application/pdf")
+        if content is not None:
+            obj = storage.upload_artifact(r.id, f"original.{ext}", content, content_type)
             uploaded_keys.append(obj.key)
-            r.s3_image_key = obj.key if is_s3 else None
-            r.image_path = obj.key if not is_s3 else None
-            if pdf_result is not None:
-                page_keys = []
-                for page in (pdf_result.page_images or []):
-                    p = storage.upload_artifact(
-                        r.id, f"pages/page-{page.page_number:03d}.jpg",
-                        page.content, "image/jpeg")
-                    uploaded_keys.append(p.key)
-                    page_keys.append(p.key)
-                r.s3_pages_keys = page_keys or None
-            if pdf_result is not None and (pdf_result.embedded_text or "").strip():
-                t = storage.upload_artifact(
-                    r.id, "ocr/source.txt",
-                    pdf_result.embedded_text.encode("utf-8"), "text/plain")
-                uploaded_keys.append(t.key)
-                r.s3_source_text_key = t.key
-        elif image_content is not None:
-            obj = storage.upload_image(image_content, image_content_type or "image/jpeg")
-            uploaded_keys.append(obj.key)
-            r.s3_image_key = obj.key if is_s3 else None
-            r.image_path = obj.key if not is_s3 else None
-
-        if original_text is not None and not pdf_content and is_s3:
-            try:
-                obj = storage.upload_text(original_text.encode("utf-8"), suffix="txt")
-                uploaded_keys.append(obj.key)
-                r.s3_source_text_key = obj.key
-            except Exception:
-                r.s3_source_text_key = None
-
-        if is_s3 or pdf_content is not None:
-            extracted_bytes = json.dumps(extracted.model_dump(mode="json"), default=str).encode("utf-8")
-            obj = storage.upload_artifact(r.id, "extracted/receipt.json", extracted_bytes, "application/json")
-            uploaded_keys.append(obj.key)
-            r.s3_extracted_key = obj.key
+            if is_s3:
+                r.s3_image_key = obj.key  # canonical original object key
+            else:
+                r.image_path = obj.key
+        # NOTE: extracted JSON lives in PostgreSQL (extracted_data), not S3.
+        # Page images and OCR text are rendered/parsed temporarily in memory
+        # for extraction and are not persisted for new records.
 
         db.commit()
     except BusinessRuleError:
@@ -596,6 +617,13 @@ def claim_detail(db: Session, user: User, claim: Claim) -> dict:
             "image_path": claim.receipt.image_path,
             "s3_image_key": claim.receipt.s3_image_key,
             "original_text": claim.receipt.original_text,
+            "original_filename": claim.receipt.original_filename,
+            "content_type": claim.receipt.content_type,
+            "file_size": claim.receipt.file_size,
+            "checksum_sha256": claim.receipt.checksum_sha256,
+            "processing_status": claim.receipt.processing_status,
+            "extracted_data": claim.receipt.extracted_data,
+            "has_pages": bool(claim.receipt.s3_pages_keys),
         }
     d["audit"] = [{
         "action": a.action, "meta": a.meta,

@@ -193,3 +193,16 @@ For image/text receipts the original is stored under the flat receipts/<uuid>.<e
 Merchant extraction is deterministic: date-only, time-only and pure-amount lines are skipped when choosing the merchant name (first plausible header line wins, falling back to the first line for receipts that contain only dates/amounts).
 
 Run migrations with alembic upgrade head (two storage migrations: 0df2dc126555 adds receipt ownership + S3 key columns, 45cc8add3d05 adds s3_pages_keys JSON). Run tests with DATABASE_URL=sqlite:///:memory: python -m pytest -v - they force local storage and never require AWS credentials. QA live runs should set S3_KEY_PREFIX=qa-temp/<run-id> so cleanup can delete exactly that prefix.
+## Storage Architecture (current)
+
+S3 stores the canonical original receipt file only; PostgreSQL stores the structured extraction result and all workflow data.
+
+New receipt uploads (PDF, JPEG, PNG, WebP) store ONE private S3 object per receipt:
+
+    receipts/<receipt-id>/original.pdf    (extension follows the actual file type)
+
+PostgreSQL receipt record holds: uploader, original filename, content type, file size, SHA-256 checksum, canonical S3 object key (s3_image_key), extracted_data (JSONB on PostgreSQL / JSON on SQLite), processing_status, plus the existing relational claim/receipt fields.
+
+For new uploads, rendered page images, OCR text and extracted JSON are NOT persisted to S3 - they are produced transiently in memory during processing. Extracted JSON (merchant, date, amount, currency, description, category, extraction_status, page_count for PDFs) lives in the receipts.extracted_data JSONB column. Existing receipts with legacy artifacts (pages/, ocr/source.txt, extracted/receipt.json) remain readable; the /api/receipts/pages endpoint keeps serving those records. JPEG/PNG/WebP uploads are never recompressed; PDFs are preserved byte-for-byte. PDF preview uses the authorized original-PDF endpoint in the browser; the page-image endpoints remain for legacy records.
+
+Migrations: 0df2dc126555 (ownership + S3 keys), 45cc8add3d05 (s3_pages_keys), b2f90471b17c (original_filename, content_type, file_size, checksum_sha256, extracted_data JSONB, processing_status).

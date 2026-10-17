@@ -86,10 +86,11 @@ class TestMerchantExtraction:
         assert "AM" not in r.merchant
 
 
-# --- PDF artifacts (local backend) -------------------------------------------
+# --- canonical original storage + JSONB extraction (local backend) -----------
 
 class TestPdfArtifactsLocal:
-    def test_pdf_upload_persists_artifacts(self, seeded):
+    def test_pdf_upload_canonical_original_and_jsonb(self, seeded):
+        import hashlib
         data = make_text_pdf(["UBER", "12 Aug 2026", "Trip to Airport", "320"])
         files = {"file": ("receipt.pdf", io.BytesIO(data), "application/pdf")}
         r = seeded.post("/api/receipts/upload", headers=login_headers(seeded), files=files)
@@ -105,14 +106,26 @@ class TestPdfArtifactsLocal:
 
         storage = get_storage()
         assert storage.get_object(original_key) == data  # original preserved byte-for-byte
-        assert rec.s3_pages_keys == [f"receipts/{rid}/pages/page-001.jpg"]
-        assert rec.s3_source_text_key.endswith("ocr/source.txt")
-        assert rec.s3_extracted_key.endswith("extracted/receipt.json")
-        parsed = json.loads(storage.get_object(rec.s3_extracted_key))
-        assert parsed["merchant"] == "UBER"
-        assert b"UBER" in storage.get_object(rec.s3_source_text_key)
+        assert original_key == f"receipts/{rid}/original.pdf"
+        # canonical file metadata
+        assert rec.original_filename == "receipt.pdf"
+        assert rec.content_type == "application/pdf"
+        assert rec.file_size == len(data)
+        assert rec.checksum_sha256 == hashlib.sha256(data).hexdigest()
+        assert rec.processing_status == "completed"
+        # extracted structured JSON lives in PostgreSQL, not S3
+        assert rec.extracted_data["merchant"] == "UBER"
+        assert rec.extracted_data["amount"] == 320.0
+        assert rec.extracted_data["extraction_status"] in ("completed", "partial")
+        # no redundant S3 artifacts for new records
+        assert rec.s3_pages_keys is None
+        assert rec.s3_source_text_key is None
+        assert rec.s3_extracted_key is None
+        # pages endpoint returns 404 for new records (no persisted page images)
+        owner = login_headers(seeded, "riya@example.com")
+        assert seeded.get(f"/api/receipts/pages/{rid}", headers=owner).status_code == 404
 
-    def test_multipage_pdf_order_preserved(self, seeded):
+    def test_multipage_pdf_extracted_without_persisting_pages(self, seeded):
         data = make_text_pdf(["PAGE TEXT"], pages=3)
         files = {"file": ("multi.pdf", io.BytesIO(data), "application/pdf")}
         r = seeded.post("/api/receipts/upload", headers=login_headers(seeded), files=files)
@@ -120,16 +133,33 @@ class TestPdfArtifactsLocal:
         rid = r.json()["receipt_id"]
 
         import app.db as db_config
-        from app.models import Receipt
         rec = fetch_receipt(rid)
-        assert list(rec.s3_pages_keys) == [f"receipts/{rid}/pages/page-{i:03d}.jpg" for i in (1, 2, 3)]
+        # original preserved; no permanent page-image artifacts
+        assert (rec.s3_image_key or rec.image_path).endswith("original.pdf")
+        assert rec.s3_pages_keys is None
+        assert rec.extracted_data.get("page_count") == 3
 
-    def test_pages_endpoint_authorized_only(self, seeded):
-        data = make_text_pdf(["UBER", "12 Aug 2026", "Trip", "320"])
-        files = {"file": ("receipt.pdf", io.BytesIO(data), "application/pdf")}
-        r = seeded.post("/api/receipts/upload", headers=login_headers(seeded), files=files)
-        assert r.status_code == 200
-        rid = r.json()["receipt_id"]
+    def test_legacy_pages_endpoint_authorized_only(self, seeded):
+        """Legacy records with persisted page images keep working; auth enforced."""
+        import app.db as db_config
+        from app.models import Receipt, User
+        from app.storage import get_storage
+
+        # build a legacy-style receipt with persisted page images
+        s = db_config.SessionLocal()
+        riya = s.query(User).filter_by(email="riya@example.com").first()
+        legacy = Receipt(user_id=riya.id, source_type="PDF", processing_status="completed")
+        s.add(legacy)
+        s.flush()
+        rid = legacy.id
+        storage = get_storage()
+        page_keys = []
+        for n in (1, 2):
+            obj = storage.upload_artifact(rid, f"pages/page-{n:03d}.jpg", b"legacy-page-bytes", "image/jpeg")
+            page_keys.append(obj.key)
+        legacy.s3_pages_keys = page_keys
+        s.commit()
+        s.close()
 
         owner = login_headers(seeded, "riya@example.com")
         other = login_headers(seeded, "neha@example.com")
@@ -138,7 +168,6 @@ class TestPdfArtifactsLocal:
         assert pages.status_code == 200
         listing = pages.json()["pages"]
         assert listing[0]["page"] == 1
-        assert listing[0]["url"] == f"/api/receipts/pages/{rid}/1"
 
         denied = seeded.get(f"/api/receipts/pages/{rid}", headers=other)
         assert denied.status_code == 403
@@ -146,7 +175,7 @@ class TestPdfArtifactsLocal:
         denied_image = seeded.get(f"/api/receipts/image/{rid}", headers=other)
         assert denied_image.status_code == 403
 
-        # page image bytes served after authorization
+        # page image bytes served after authorization (legacy records)
         content = seeded.get(f"/api/receipts/pages/{rid}/1", headers=owner)
         assert content.status_code == 200
         assert content.headers["content-type"].startswith("image/jpeg")
@@ -155,18 +184,61 @@ class TestPdfArtifactsLocal:
         not_found = seeded.get(f"/api/receipts/pages/{rid}/9", headers=owner)
         assert not_found.status_code == 404
 
-    def test_original_pdf_bytes_preserved(self, seeded):
-        data = make_text_pdf(["UBER", "12 Aug 2026", "Trip", "320"])
-        files = {"file": ("receipt.pdf", io.BytesIO(data), "application/pdf")}
-        r = seeded.post("/api/receipts/upload", headers=login_headers(seeded), files=files)
-        rid = r.json()["receipt_id"]
+# --- image format preservation (no silent conversion) -------------------------
 
+class TestImageFormatPreservation:
+    """The storage layer keeps each format's canonical bytes untouched.
+    Calls _store_artifacts directly (AI vision is not configured in tests)."""
+
+    def _store(self, data: bytes, content_type: str, filename: str):
         import app.db as db_config
-        from app.models import Receipt
+        from app.models import User
+        from app.services import _store_artifacts
+        from app.schemas import ExtractedReceipt
+        from datetime import date as _d
+        s = db_config.SessionLocal()
+        user = s.query(User).filter_by(email="riya@example.com").first()
+        s.expunge(user)
+        session = db_config.SessionLocal()
+        s.close()
+        ex = ExtractedReceipt(merchant="SNAP SHOP", date=_d(2026, 1, 2), amount=10.0,
+                              currency="INR", description="test", category="OTHER",
+                              raw_text="SNAP SHOPPING")
+        return _store_artifacts(session, user, ex, image_content=data,
+                                image_content_type=content_type, original_filename=filename)
+
+    def test_png_preserved_as_png(self, seeded):
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.new("RGB", (120, 40), "white").save(buf, format="PNG")
+        data = buf.getvalue()
+        rec = self._store(data, "image/png", "shot.png")
+        assert rec.content_type == "image/png"
+        assert rec.original_filename == "shot.png"
         from app.storage import get_storage
-        rec = fetch_receipt(rid)
-        original_key = rec.s3_image_key or rec.image_path
-        assert get_storage().get_object(original_key) == data
+        key = rec.s3_image_key or rec.image_path
+        assert key.endswith("original.png")
+        assert get_storage().get_object(key) == data  # no recompression
+
+    def test_jpeg_preserved_as_jpeg(self, seeded):
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.new("RGB", (120, 40), "white").save(buf, format="JPEG")
+        data = buf.getvalue()
+        rec = self._store(data, "image/jpeg", "photo.jpg")
+        assert rec.content_type == "image/jpeg"
+        assert (rec.s3_image_key or rec.image_path).endswith("original.jpg")
+        from app.storage import get_storage
+        assert get_storage().get_object(rec.s3_image_key or rec.image_path) == data
+
+    def test_webp_preserved(self, seeded):
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.new("RGB", (120, 40), "white").save(buf, format="WEBP")
+        data = buf.getvalue()
+        rec = self._store(data, "image/webp", "shot.webp")
+        assert rec.content_type == "image/webp"
+        assert (rec.s3_image_key or rec.image_path or "").endswith("original.webp")
 
 
 # --- PDF artifacts (mocked S3, no real AWS) -----------------------------------
@@ -184,7 +256,9 @@ class TestPdfArtifactsS3Mocked:
         import app.db as db_config
         db_config._storage_instance = None
 
-    def test_s3_artifact_keys_persisted(self, seeded, monkeypatch):
+    def test_s3_canonical_original_only(self, seeded, monkeypatch):
+        """New uploads store exactly one S3 object: the canonical original.
+        No page images, OCR text or extracted JSON are uploaded."""
         import app.db as db_config
         self._enable_s3(monkeypatch)
         mock_s3 = MagicMock()  # records calls, no network
@@ -198,21 +272,20 @@ class TestPdfArtifactsS3Mocked:
 
                 rec = fetch_receipt(rid)
                 assert rec.s3_image_key == f"receipts/{rid}/original.pdf"
-                assert rec.s3_pages_keys == [f"receipts/{rid}/pages/page-001.jpg"]
-                assert rec.s3_source_text_key == f"receipts/{rid}/ocr/source.txt"
-                assert rec.s3_extracted_key.endswith("extracted/receipt.json")
+                # no redundant artifacts for new records
+                assert rec.s3_pages_keys is None
+                assert rec.s3_source_text_key is None
+                assert rec.s3_extracted_key is None
 
-                put_keys = sorted(c.kwargs["Key"] for c in mock_s3.put_object.call_args_list)
-                assert put_keys == [
-                    f"receipts/{rid}/extracted/receipt.json",
-                    f"receipts/{rid}/ocr/source.txt",
-                    f"receipts/{rid}/original.pdf",
-                    f"receipts/{rid}/pages/page-001.jpg",
-                ]
+                put_keys = [c.kwargs["Key"] for c in mock_s3.put_object.call_args_list]
+                assert put_keys == [f"receipts/{rid}/original.pdf"]  # exactly one object
+                # extracted data persisted in the database
+                assert rec.extracted_data["merchant"] == "UBER"
+                assert rec.checksum_sha256 is not None
         finally:
             db_config._storage_instance = None
 
-    def test_presigned_pages_expiry(self, seeded, monkeypatch):
+    def test_presigned_original_expiry(self, seeded, monkeypatch):
         import app.db as db_config
         self._enable_s3(monkeypatch)
         # MagicMock client for uploads (no network); presigned URLs generated by
@@ -231,25 +304,19 @@ class TestPdfArtifactsS3Mocked:
                 rid = r.json()["receipt_id"]
 
                 rec = fetch_receipt(rid)
-                page_keys = list(rec.s3_pages_keys or [])
-                assert page_keys
-
-                url = get_storage().get_download_url(page_keys[0], db_config.PRESIGNED_URL_EXPIRES)
+                url = get_storage().get_download_url(rec.s3_image_key, db_config.PRESIGNED_URL_EXPIRES)
                 assert parse_qs(urlparse(url).query).get("X-Amz-Expires") == ["300"]
         finally:
             db_config._storage_instance = None
 
     def test_partial_failure_cleans_up_and_reports_failure(self, seeded, monkeypatch):
-        """Second artifact upload fails -> 422, no DB row, first upload deleted."""
+        """Original upload fails -> 422, no DB row, nothing left in S3."""
         import app.db as db_config
         from app.models import Receipt
         self._enable_s3(monkeypatch)
         mock_s3 = MagicMock()
-        mock_s3.put_object.side_effect = None
 
         def put_side_effect(**kwargs):
-            if "original.pdf" in kwargs.get("Key", ""):
-                return MagicMock()  # original upload succeeds
             raise RuntimeError("simulated S3 outage")
 
         mock_s3.put_object.side_effect = put_side_effect
@@ -264,7 +331,6 @@ class TestPdfArtifactsS3Mocked:
                 files = {"file": ("receipt.pdf", io.BytesIO(data), "application/pdf")}
                 r = seeded.post("/api/receipts/upload", headers=login_headers(seeded), files=files)
                 assert r.status_code == 422
-                assert r.status_code == 422
                 assert "storage failed" in r.json()["detail"].lower()
 
                 # no orphaned DB record beyond the pre-existing seed data
@@ -272,9 +338,5 @@ class TestPdfArtifactsS3Mocked:
                 count = s.query(Receipt).count()
                 s.close()
                 assert count == baseline_count
-
-                # cleanup deleted the original that succeeded before the failure
-                deleted = [c.kwargs["Key"] for c in mock_s3.delete_object.call_args_list]
-                assert any("original.pdf" in k for k in deleted)
         finally:
             self._teardown()
