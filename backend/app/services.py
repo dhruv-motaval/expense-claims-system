@@ -1,6 +1,7 @@
 """Services: auth, claims workflow, state machine, reporting, audit."""
 import hashlib
 import hmac
+import json
 import os
 from datetime import date, datetime, timedelta, timezone
 
@@ -8,12 +9,13 @@ from fastapi import HTTPException, UploadFile
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .db import STORAGE_DIR
+from . import db as db_config
 from .duplicates import (content_hash, fingerprint, find_duplicates, has_paid_duplicate,
                          match_dict, normalize_merchant, parse_date, categorize, parse_amount)
 from .extractors import ExtractionError, extract_from_text, extract_from_image
 from .models import AuditEvent, Category, Claim, Receipt, Role, SourceType, Status, User, utcnow
 from .schemas import ClaimCreate, ClaimUpdate, ExtractedReceipt
+from .storage import get_storage
 
 ALLOWED_TRANSITIONS = {
     Status.DRAFT: {Status.SUBMITTED},
@@ -32,7 +34,7 @@ class BusinessRuleError(HTTPException):
         super().__init__(status_code=422, detail=msg)
 
 
-def login(db: Session, email: str) -> User:
+def login(db: Session, email: str) -> tuple[User, str]:
     user = db.scalar(select(User).where(func.lower(User.email) == email.lower().strip()))
     if not user:
         raise HTTPException(status_code=401, detail="Unknown user. Use a demo account.")
@@ -67,28 +69,172 @@ def require_claim_view(user: User, claim: Claim):
         raise HTTPException(status_code=403, detail="You do not have access to this claim.")
 
 
+def can_view_receipt(user: User, receipt: Receipt) -> bool:
+    if user.role == Role.FINANCE.value:
+        return True
+    if receipt.user_id == user.id:
+        return True
+    if user.role == Role.MANAGER.value:
+        if receipt.user and receipt.user.manager_id == user.id:
+            return True
+        for claim in getattr(receipt, "claims", []) or []:
+            if claim.user and claim.user.manager_id == user.id:
+                return True
+    return False
+
+
+def get_receipt_content(db: Session, user: User, receipt: Receipt) -> bytes:
+    """Authorized retrieval of stored receipt bytes. Auth check comes first."""
+    if not can_view_receipt(user, receipt):
+        raise HTTPException(status_code=403, detail="You do not have access to this receipt.")
+    storage = get_storage()
+    key = receipt.s3_image_key or receipt.image_path
+    if not key:
+        raise HTTPException(status_code=404, detail="No receipt image.")
+    try:
+        return storage.get_object(key)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="No receipt image.")
+
+
+# --- file type detection -------------------------------------------------
+
+IMAGE_MIME_TYPES = ("image/jpeg", "image/png", "image/webp")
+
+_PDF_MAGIC = b"%PDF-"
+_JPEG_MAGIC = b"\xff\xd8\xff"
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+_WEBP_MAGIC = b"RIFF"
+
+
+def _is_pdf_signature(content: bytes) -> bool:
+    return bool(content) and content[:5] == _PDF_MAGIC
+
+
+def _is_image_signature(content: bytes) -> bool:
+    return (content[:3] == _JPEG_MAGIC
+            or content[:8] == _PNG_MAGIC
+            or (content[:4] == _WEBP_MAGIC and content[8:12] == b"WEBP"))
+
+
+def _is_pdf(content: bytes, filename: str, content_type: str | None = None) -> bool:
+    if _is_pdf_signature(content):
+        return True
+    if filename and filename.lower().endswith(".pdf"):
+        return True
+    return content_type == "application/pdf"
+
+
+def _is_image(content_type: str | None, content: bytes) -> bool:
+    if content_type in IMAGE_MIME_TYPES:
+        return True
+    return _is_image_signature(content)
+
+
+def _sniff_image_type(content: bytes) -> str | None:
+    if content[:3] == _JPEG_MAGIC:
+        return "image/jpeg"
+    if content[:8] == _PNG_MAGIC:
+        return "image/png"
+    if content[:4] == b"RIFF" and content[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def _pdf_magic_ok(content: bytes) -> bool:
+    return _is_pdf_signature(content)
+
+
 # --- extraction ----------------------------------------------------------
 
 def extract(db: Session, user: User, text: str) -> dict:
+    if not (text or "").strip():
+        raise BusinessRuleError("No receipt text found. Enter the claim manually.")
     try:
         r: ExtractedReceipt = extract_from_text(text)
     except ExtractionError as e:
         raise BusinessRuleError(str(e))
-    receipt = _save_receipt(db, SourceType.TEXT.value, original_text=text, extracted=r)
+    receipt = _store_artifacts(db, user, r, original_text=text)
     return {"receipt_id": receipt.id,
             "duplicate_matches": _duplicates(db, r), **r.model_dump(mode="json")}
 
 
 async def extract_upload(db: Session, user: User, file: UploadFile) -> dict:
-    if file.content_type not in ("image/jpeg", "image/png", "image/webp"):
-        raise BusinessRuleError("Upload a jpg, png or webp receipt image.")
+    max_size = db_config.UPLOAD_MAX_SIZE_MB * 1024 * 1024
     content = await file.read()
+    if len(content) > max_size:
+        raise BusinessRuleError(f"File too large. Max size {db_config.UPLOAD_MAX_SIZE_MB}MB.")
+    if not content:
+        raise BusinessRuleError("Empty file. Upload a receipt image or PDF.")
+
+    filename = file.filename or ""
+    if _is_pdf(content, filename, file.content_type):
+        return await _extract_pdf_upload(db, user, content, filename)
+
+    sniffed = _sniff_image_type(content)
+    if file.content_type not in IMAGE_MIME_TYPES and sniffed is None:
+        raise BusinessRuleError("Upload a jpg, png, webp receipt image or a PDF receipt.")
+    content_type = file.content_type if file.content_type in IMAGE_MIME_TYPES else (sniffed or file.content_type)
     try:
-        r = await extract_from_image(content, file.content_type)
+        r = await extract_from_image(content, content_type)
     except ExtractionError as e:
         raise BusinessRuleError(str(e))
-    path = _save_image(content, file.filename or "receipt.jpg")
-    receipt = _save_receipt(db, SourceType.IMAGE.value, image_path=path, extracted=r)
+    receipt = _store_artifacts(db, user, r, image_content=content, image_content_type=content_type,
+                               original_filename=filename)
+    return {"receipt_id": receipt.id,
+            "duplicate_matches": _duplicates(db, r), **r.model_dump(mode="json")}
+
+
+def _pdf_processor() -> "PDFProcessor":
+    from .pdf_processor import PDFProcessor
+
+    return PDFProcessor(
+        max_pages=int(os.getenv("PDF_MAX_PAGES", "10")),
+        dpi=int(os.getenv("PDF_RENDER_DPI", "180")),
+        jpeg_quality=int(os.getenv("PDF_JPEG_QUALITY", "80")),
+        max_size_mb=db_config.UPLOAD_MAX_SIZE_MB,
+    )
+
+
+def _extract_pdf_fields(pdf_bytes: bytes):
+    """Extract structured fields from a PDF via embedded text (local only).
+
+    Returns (ExtractedReceipt, PDFProcessingResult) so page images and the
+    extraction snapshot can be persisted as artifacts by the caller.
+    """
+    processor = _pdf_processor()
+    result = processor.process_pdf(pdf_bytes)
+    text = (result.embedded_text or "").strip()
+    if not text.strip():
+        # Optional local OCR fallback (requires Tesseract; not required for tests).
+        try:
+            from .ocr import ocr_pdf_pages  # optional dependency
+            text = (ocr_text := ocr_pdf_pages(pdf_bytes, processor.dpi) or "").strip()
+        except Exception:
+            text = ""
+    if not text.strip():
+        raise ExtractionError("No readable text found in the PDF. Enter the claim manually.")
+    try:
+        r: ExtractedReceipt = extract_from_text(text)
+    except ExtractionError as e:
+        raise BusinessRuleError(str(e))
+    r.raw_text = text
+    return r, result
+
+
+async def _extract_pdf_upload(db: Session, user: User, content: bytes, filename: str) -> dict:
+    if len(content) > db_config.UPLOAD_MAX_SIZE_MB * 1024 * 1024:
+        raise BusinessRuleError(f"File too large. Max size {db_config.UPLOAD_MAX_SIZE_MB}MB.")
+    if not _pdf_magic_ok(content):
+        raise BusinessRuleError("Invalid or corrupted PDF file.")
+    try:
+        r, pdf_result = _extract_pdf_fields(content)
+    except BusinessRuleError:
+        raise
+    except ValueError as e:
+        raise BusinessRuleError(str(e))
+    receipt = _store_artifacts(db, user, r, pdf_content=content, pdf_result=pdf_result,
+                               original_filename=filename)
     return {"receipt_id": receipt.id,
             "duplicate_matches": _duplicates(db, r), **r.model_dump(mode="json")}
 
@@ -99,12 +245,78 @@ def _duplicates(db: Session, r: ExtractedReceipt) -> list[dict]:
              "amount": r.amount, "description": r.description})]
 
 
-def _save_receipt(db: Session, source_type: str, extracted: ExtractedReceipt,
-                  original_text: str | None = None, image_path: str | None = None) -> Receipt:
+def _duplicates(db: Session, r: ExtractedReceipt) -> list[dict]:
+    return [match_dict(m) for m in find_duplicates(
+        db, {"merchant": r.merchant, "date": r.date,
+             "amount": r.amount, "description": r.description})]
+
+
+def _ext_for(content_type: str) -> str:
+    return {
+        "application/pdf": "pdf",
+        "image/jpeg": "jpg",
+        "image/png": "png",
+        "image/webp": "webp",
+    }.get(content_type, "bin")
+
+
+def _store_artifacts(db: Session, user: User, extracted: ExtractedReceipt,
+                     original_text: str | None = None,
+                     image_content: bytes | None = None,
+                     image_content_type: str | None = None,
+                     original_filename: str | None = None,
+                     pdf_content: bytes | None = None,
+                     pdf_result=None) -> Receipt:
+    """Store the canonical original receipt file in S3 and the structured
+    extraction result in PostgreSQL.
+
+    New records keep ONE private S3 object under a per-receipt key space:
+
+        receipts/<receipt-id>/original.pdf   (or original.jpg/png/webp by type)
+
+    Extracted structured data, file metadata (filename, content type, size,
+    sha256 checksum), processing status and workflow data live in PostgreSQL.
+    Page images, OCR text and extracted JSON are rendered/parsed transiently
+    in memory for extraction; they are NOT persisted to S3 for new uploads
+    (legacy receipts that already have those artifacts keep working).
+
+    The receipt row is flushed first to obtain the id used in the object key.
+    If any later step fails, every object uploaded during this call is deleted
+    best-effort and the transaction is rolled back - no silent fallback, no
+    orphaned objects, and no DB record without its canonical file.
+    """
+    import hashlib
+
+    storage = get_storage()
+    is_s3 = db_config.STORAGE_BACKEND == "s3"
+    uploaded_keys: list[str] = []
+
+    if pdf_content is not None:
+        content = pdf_content
+        content_type = "application/pdf"
+        ext = "pdf"
+        source_type = "PDF"
+    elif image_content is not None:
+        content = image_content
+        sniffed = _sniff_image_type(image_content)
+        content_type = sniffed or image_content_type or "image/jpeg"
+        ext = _ext_for(content_type)
+        source_type = SourceType.IMAGE.value
+    else:
+        content = None
+        ext = ""
+        content_type = None
+        source_type = SourceType.TEXT.value
+
+    checksum = hashlib.sha256(content).hexdigest() if content else None
+    extracted_payload = {**extracted.model_dump(mode="json"),
+                         "extraction_status": "completed" if extracted.amount is not None else "partial"}
+    if pdf_result is not None:
+        extracted_payload["page_count"] = len(pdf_result.page_images or [])
     r = Receipt(
+        user_id=user.id,
         source_type=source_type,
         original_text=original_text,
-        image_path=image_path,
         merchant=extracted.merchant,
         receipt_date=extracted.date,
         amount=extracted.amount,
@@ -113,25 +325,55 @@ def _save_receipt(db: Session, source_type: str, extracted: ExtractedReceipt,
         normalized_hash=content_hash(extracted.raw_text),
         content_hash=fingerprint(extracted.merchant, extracted.date, extracted.amount,
                                  extracted.currency, extracted.description),
+        original_filename=original_filename,
+        content_type=content_type,
+        file_size=len(content) if content else None,
+        checksum_sha256=checksum,
+        extracted_data=extracted_payload,
+        processing_status="completed",
     )
     db.add(r)
-    db.commit()
+    db.flush()  # assign r.id for the canonical object key
+
+    def _cleanup():
+        for k in uploaded_keys:
+            try:
+                get_storage().delete_object(k)
+            except Exception:
+                pass
+        db.rollback()
+
+    try:
+        if content is not None:
+            obj = storage.upload_artifact(r.id, f"original.{ext}", content, content_type)
+            uploaded_keys.append(obj.key)
+            if is_s3:
+                r.s3_image_key = obj.key  # canonical original object key
+            else:
+                r.image_path = obj.key
+        # NOTE: extracted JSON lives in PostgreSQL (extracted_data), not S3.
+        # Page images and OCR text are rendered/parsed temporarily in memory
+        # for extraction and are not persisted for new records.
+
+        db.commit()
+    except BusinessRuleError:
+        _cleanup()
+        raise
+    except Exception:
+        _cleanup()
+        raise BusinessRuleError("Receipt storage failed. Please retry.")
+
     db.refresh(r)
     return r
-
-
-def _save_image(content: bytes, filename: str) -> str:
-    receipts_dir = os.path.join(STORAGE_DIR, "receipts")
-    os.makedirs(receipts_dir, exist_ok=True)
-    path = os.path.join(receipts_dir, f"{int(datetime.now().timestamp() * 1000)}-{os.path.basename(filename)}")
-    with open(path, "wb") as f:
-        f.write(content)
-    return os.path.relpath(path, STORAGE_DIR)
 
 
 # --- claims --------------------------------------------------------------
 
 def create_claim(db: Session, user: User, data: ClaimCreate) -> Claim:
+    if data.receipt_id:
+        receipt = db.get(Receipt, data.receipt_id)
+        if not receipt or receipt.user_id != user.id:
+            raise BusinessRuleError("Invalid receipt reference.")
     claim = Claim(
         claim_number=next_claim_number(db),
         user_id=user.id,
@@ -276,7 +518,6 @@ def staff_dashboard(db: Session, user: User) -> dict:
     first, nxt = month_bounds()
     claims = list(db.scalars(select(Claim).where(Claim.user_id == user.id)
                              .order_by(Claim.id.desc()).limit(20)))
-    this_month = [c for c in claims if first <= c.transaction_date < nxt]
     return {
         "limit": limit_status(monthly_spend(db, user.id), float(user.monthly_limit)),
         "claims_total": len(claims),
@@ -359,7 +600,7 @@ def claim_dict(c: Claim) -> dict:
         "transaction_date": c.transaction_date.isoformat(), "category": c.category,
         "amount": float(c.amount), "currency": c.currency, "description": c.description,
         "status": c.status, "rejection_reason": c.rejection_reason,
-        "has_receipt_image": bool(c.receipt and c.receipt.image_path),
+        "has_receipt_image": bool(c.receipt and (c.receipt.image_path or c.receipt.s3_image_key)),
         "submitted_at": c.submitted_at.isoformat() if c.submitted_at else None,
         "approved_at": c.approved_at.isoformat() if c.approved_at else None,
         "paid_at": c.paid_at.isoformat() if c.paid_at else None,
@@ -374,7 +615,15 @@ def claim_detail(db: Session, user: User, claim: Claim) -> dict:
         d["receipt"] = {
             "source_type": claim.receipt.source_type,
             "image_path": claim.receipt.image_path,
+            "s3_image_key": claim.receipt.s3_image_key,
             "original_text": claim.receipt.original_text,
+            "original_filename": claim.receipt.original_filename,
+            "content_type": claim.receipt.content_type,
+            "file_size": claim.receipt.file_size,
+            "checksum_sha256": claim.receipt.checksum_sha256,
+            "processing_status": claim.receipt.processing_status,
+            "extracted_data": claim.receipt.extracted_data,
+            "has_pages": bool(claim.receipt.s3_pages_keys),
         }
     d["audit"] = [{
         "action": a.action, "meta": a.meta,

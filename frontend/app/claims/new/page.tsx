@@ -114,10 +114,21 @@ export default function NewClaimPage() {
             </button>
           </div>
           <div className="bg-white rounded-lg shadow p-4 space-y-3">
-            <label htmlFor="receipt-file" className="block text-sm font-medium">Or upload receipt image (jpg/png/webp)</label>
+            <label htmlFor="receipt-file" className="block text-sm font-medium">Or upload receipt file (pdf/jpg/png/webp, max 10 MB)</label>
             <input
-              id="receipt-file" type="file" accept="image/jpeg,image/png,image/webp"
-              onChange={(e) => setFile(e.target.files?.[0] || null)}
+              id="receipt-file" type="file" accept="application/pdf,image/jpeg,image/png,image/webp,.pdf,.jpg,.jpeg,.png,.webp"
+              onChange={(e) => {
+                const f = e.target.files?.[0] || null;
+                setError("");
+                if (f) {
+                  const okType = f.type === "application/pdf" || ["image/jpeg", "image/png", "image/webp"].includes(f.type)
+                    || /\.(pdf|jpe?g|png|webp)$/i.test(f.name);
+                  if (!okType) { setError("Unsupported file. Upload a PDF, JPG, PNG or WebP receipt."); return; }
+                  if (f.size > 10 * 1024 * 1024) { setError("File too large. Max size is 10 MB."); return; }
+                  if (f.size === 0) { setError("The selected file is empty."); return; }
+                }
+                setFile(f);
+              }}
               className="block text-sm"
             />
             {file && (
@@ -128,7 +139,10 @@ export default function NewClaimPage() {
                 )}
                 <div className="flex-1 min-w-0 text-sm">
                   <p className="truncate font-medium">{file.name}</p>
-                  <p className="text-xs text-gray-500">{(file.size / 1024).toFixed(0)} KB</p>
+                  <p className="text-xs text-gray-500">
+                    {file.type === "application/pdf" || /\.pdf$/i.test(file.name) ? "PDF document · " : ""}
+                    {(file.size / 1024).toFixed(0)} KB
+                  </p>
                 </div>
                 <button
                   onClick={() => { setFile(null); setPreview(""); if (fileInputRef.current) fileInputRef.current.value = ""; }}
@@ -144,7 +158,10 @@ export default function NewClaimPage() {
               onClick={uploadImage} disabled={busy === "extract" || !file}
               className="bg-blue-600 text-white rounded px-4 py-2 text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
             >
-              {busy === "extract" ? "Uploading..." : "Upload & Extract"}
+              {busy === "extract"
+                ? (file && (file.type === "application/pdf" || /\.pdf$/i.test(file.name))
+                  ? "Processing PDF (extract text, render pages)..." : "Uploading & extracting...")
+                : "Upload & Extract"}
             </button>
           </div>
           <ErrorBox message={error} />

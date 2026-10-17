@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
-import { api, useMe } from "@/lib/auth";
+import { api, getToken, useMe } from "@/lib/auth";
 import { inr, fmtDate, fmtDateTime } from "@/lib/format";
 import { ErrorBox, Shell, StatusBadge } from "@/components/ui";
 
@@ -27,9 +27,47 @@ export default function ClaimDetailPage() {
   const [busy, setBusy] = useState("");
   const [rejecting, setRejecting] = useState(false);
   const [reason, setReason] = useState("");
+  const [pageUrls, setPageUrls] = useState<string[]>([]);
+  const [previewKind, setPreviewKind] = useState<"" | "pdf" | "image">("");
+  const [originalUrl, setOriginalUrl] = useState("");
 
   const load = useCallback(() => {
-    api(`/claims/${id}`).then(setClaim).catch((e) => setError(e.message));
+    api(`/claims/${id}`).then(async (c: any) => {
+      setClaim(c);
+      try {
+        // Receipt preview: PDFs are shown via the authorized original-PDF
+        // endpoint (browser-native PDF viewer); images via the same endpoint.
+        // Legacy receipts with persisted page images fall back to page previews.
+        const rec = c.receipt;
+        if (!rec || (!rec.s3_image_key && !rec.image_path)) return;
+        const token = getToken() || "";
+        if (rec.has_pages) {
+          try {
+            const d = await api(`/receipts/pages/${id}`);
+            const urls: string[] = [];
+            for (const p of d.pages || []) {
+              const isPresigned = p.url.startsWith("http");
+              const res = await fetch(p.url, isPresigned ? {} : { headers: { Authorization: `Bearer ${token}` } });
+              if (res.ok) urls.push(URL.createObjectURL(await res.blob()));
+            }
+            if (urls.length) { setPageUrls(urls); return; }
+          } catch { /* fall through to original-file preview */ }
+        }
+        const res = await fetch(`/api/receipts/image/${id}`, { headers: { Authorization: `Bearer ${token}` } });
+        if (res.ok) {
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          if (rec.content_type === "application/pdf" || rec.s3_image_key?.endsWith(".pdf")) {
+            setPreviewKind("pdf");
+          } else {
+            setPreviewKind("image");
+          }
+          setOriginalUrl(URL.createObjectURL(blob));
+        }
+      } catch {
+        /* preview is best-effort */
+      }
+    }).catch((e) => setError(e.message));
   }, [id]);
   useEffect(load, [load]);
 
@@ -78,8 +116,48 @@ export default function ClaimDetailPage() {
         )}
         {claim.receipt?.original_text && (
           <div className="col-span-2">
-            <p className="text-gray-500 mb-1">Original receipt</p>
+            <p className="text-gray-500 mb-1">Original receipt text</p>
             <pre className="bg-gray-50 border rounded p-2 text-xs whitespace-pre-wrap">{claim.receipt.original_text}</pre>
+          </div>
+        )}
+        {previewKind === "pdf" && originalUrl && (
+          <div className="col-span-2">
+            <p className="text-gray-500 mb-1">Original receipt (PDF preview)</p>
+            <iframe src={originalUrl} title="Receipt PDF preview"
+              className="w-full h-96 rounded border bg-gray-50" />
+            <a href={originalUrl} download={claim.receipt?.original_filename || "receipt.pdf"}
+              className="text-xs text-blue-600 hover:underline">Download original PDF</a>
+          </div>
+        )}
+        {previewKind === "image" && originalUrl && (
+          <div className="col-span-2">
+            <p className="text-gray-500 mb-1">Original receipt</p>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={originalUrl} alt="Receipt" className="max-h-72 rounded border" />
+          </div>
+        )}
+        {pageUrls.length > 0 && (
+          <div className="col-span-2">
+            <p className="text-gray-500 mb-1">Receipt pages</p>
+            <div className="flex flex-wrap gap-2">
+              {pageUrls.map((u, i) => (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img key={i} src={u} alt={`Receipt page ${i + 1}`}
+                  className="h-40 w-auto rounded border" />
+              ))}
+            </div>
+          </div>
+        )}
+        {claim.receipt?.extracted_data && (
+          <div className="col-span-2">
+            <p className="text-gray-500 mb-1">Extracted data</p>
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              {Object.entries(claim.receipt.extracted_data)
+                .filter(([, v]) => v !== null && v !== "")
+                .map(([k, v]) => (
+                  <div key={k}><span className="text-gray-400">{k}</span>: {String(v)}</div>
+                ))}
+            </div>
           </div>
         )}
       </div>

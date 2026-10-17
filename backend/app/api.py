@@ -1,13 +1,15 @@
 from datetime import date
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, Response
 from sqlalchemy.orm import Session
 
 from . import services
+from . import db as db_config
 from .db import STORAGE_DIR, get_db
 from .deps import current_user, require_role
-from .models import Claim, Role, User
+from .models import Claim, Role, User, Receipt
 from .schemas import ClaimCreate, ClaimUpdate, LoginIn
+from .storage import get_storage
 
 router = APIRouter()
 
@@ -36,15 +38,78 @@ async def upload_receipt(file: UploadFile = File(...), db: Session = Depends(get
 
 @router.get("/receipts/image/{receipt_id}")
 def receipt_image(receipt_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
-    from fastapi.responses import FileResponse
-    from sqlalchemy import select
-    from .models import Receipt
-    receipt = db.get(Receipt, receipt_id)
-    if not receipt or not receipt.image_path:
-        raise HTTPException(status_code=404, detail="No receipt image.")
     import os
-    path = os.path.join(STORAGE_DIR, receipt.image_path)
-    return FileResponse(path)
+    import mimetypes
+    from fastapi.responses import FileResponse
+
+    receipt = db.get(Receipt, receipt_id)
+    if not receipt:
+        raise HTTPException(status_code=404, detail="No receipt image.")
+    if not services.can_view_receipt(user, receipt):
+        raise HTTPException(status_code=403, detail="You do not have access to this receipt.")
+
+    if db_config.STORAGE_BACKEND == "s3":
+        if not receipt.s3_image_key:
+            raise HTTPException(status_code=404, detail="No receipt image.")
+        try:
+            content = services.get_receipt_content(db, user, receipt)
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=404, detail="No receipt image.")
+        ct = mimetypes.guess_type(receipt.s3_image_key or "")[0] or "application/octet-stream"
+        return Response(content=content, media_type=ct)
+    else:
+        key = receipt.image_path or receipt.s3_image_key
+        if not key:
+            raise HTTPException(status_code=404, detail="No receipt image.")
+        path = os.path.join(STORAGE_DIR, key)
+        if not os.path.exists(path):
+            raise HTTPException(status_code=404, detail="No receipt image.")
+        return FileResponse(path)
+
+
+@router.get("/receipts/pages/{receipt_id}")
+def receipt_pages(receipt_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """Authorized page-image listing for PDF receipt preview (auth check first)."""
+    receipt = db.get(Receipt, receipt_id)
+    if not receipt:
+        raise HTTPException(status_code=404, detail="No receipt image.")
+    if not services.can_view_receipt(user, receipt):
+        raise HTTPException(status_code=403, detail="You do not have access to this receipt.")
+
+    page_keys = receipt.s3_pages_keys or []
+    if not page_keys:
+        raise HTTPException(status_code=404, detail="No receipt pages.")
+    pages = []
+    for i, key in enumerate(page_keys, start=1):
+        if db_config.STORAGE_BACKEND == "s3":
+            from .storage import get_storage
+            url = get_storage().get_download_url(key, db_config.PRESIGNED_URL_EXPIRES)
+        else:
+            url = f"/api/receipts/pages/{receipt_id}/{i}"
+        pages.append({"page": i, "key": key, "url": url, "content_type": "image/jpeg"})
+    return {"pages": pages}
+
+
+@router.get("/receipts/pages/{receipt_id}/{page}")
+def receipt_page_content(receipt_id: int, page: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """Serve one rendered page image after authorization."""
+    receipt = db.get(Receipt, receipt_id)
+    if not receipt:
+        raise HTTPException(status_code=404, detail="No receipt image.")
+    if not services.can_view_receipt(user, receipt):
+        raise HTTPException(status_code=403, detail="You do not have access to this receipt.")
+
+    page_keys = receipt.s3_pages_keys or []
+    if not page_keys or page < 1 or page > len(page_keys):
+        raise HTTPException(status_code=404, detail="No receipt pages.")
+    key = page_keys[page - 1]
+    try:
+        content = get_storage().get_object(key)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="No receipt pages.")
+    return Response(content=content, media_type="image/jpeg")
 
 
 claim_router = APIRouter(prefix="/claims")
@@ -68,7 +133,6 @@ def list_claims(db: Session = Depends(get_db), user: User = Depends(current_user
     from sqlalchemy import select
     claims = db.scalars(select(Claim).order_by(Claim.id.desc()).limit(200)).all()
     return [services.claim_dict(c) for c in claims if services.can_view(user, c)]
-
 
 @claim_router.get("/{claim_id}")
 def get_claim(claim_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):

@@ -2,6 +2,10 @@ import os
 
 os.environ["DATABASE_URL"] = "sqlite:///:memory:"
 os.environ["SECRET_KEY"] = "test-secret"
+# Unit tests must never touch real AWS: force local storage before app import.
+# S3-mode tests explicitly override app.db module attributes at runtime.
+os.environ["STORAGE_BACKEND"] = "local"
+os.environ["AI_API_KEY"] = ""
 
 from fastapi.testclient import TestClient
 import pytest
