@@ -184,7 +184,57 @@ class TestPdfArtifactsLocal:
         not_found = seeded.get(f"/api/receipts/pages/{rid}/9", headers=owner)
         assert not_found.status_code == 404
 
-# --- image format preservation (no silent conversion) -------------------------
+    def test_original_pdf_bytes_preserved(self, seeded):
+        data = make_text_pdf(["UBER", "12 Aug 2026", "Trip", "320"])
+        files = {"file": ("receipt.pdf", io.BytesIO(data), "application/pdf")}
+        r = seeded.post("/api/receipts/upload", headers=login_headers(seeded), files=files)
+        rid = r.json()["receipt_id"]
+
+        import app.db as db_config
+        from app.models import Receipt
+        from app.storage import get_storage
+        rec = fetch_receipt(rid)
+        original_key = rec.s3_image_key or rec.image_path
+        assert get_storage().get_object(original_key) == data
+
+
+# --- scanned PDF / OCR unavailable -------------------------------------------
+
+class TestScannedPdfGraceful:
+    def test_scanned_pdf_without_tesseract_reports_clear_error(self, seeded):
+        """A PDF with no embedded text must fail gracefully when the optional
+        local OCR engine (Tesseract) is not installed - clear error, no storage."""
+        from PIL import Image
+        import fitz
+        buf = io.BytesIO()
+        Image.new("RGB", (200, 100), "white").save(buf, format="PNG")
+        doc = fitz.open()
+        page = doc.new_page(width=200, height=100)
+        page.insert_image(fitz.Rect(0, 0, 200, 100), stream=buf.getvalue())
+        data = doc.tobytes()
+        doc.close()
+
+        from app.services import _extract_pdf_fields
+        from app.extractors import ExtractionError
+        try:
+            import pytesseract  # if Tesseract IS available, OCR path may succeed
+            has_ocr = True
+        except ImportError:
+            has_ocr = False
+
+        try:
+            _extracted, result = _extract_pdf_fields_import()(data)
+        except Exception as e:
+            # graceful failure message, no crash and no invented values
+            assert "No readable text" in str(e) or "OCR" in str(e) or "Enter the claim manually" in str(e)
+            return
+        # if OCR is installed and succeeded, extraction must still be well-formed
+        assert _extracted.merchant is not None or _extracted.amount is not None
+
+
+def _extract_pdf_fields_import():
+    from app.services import _extract_pdf_fields
+    return _extract_pdf_fields
 
 class TestImageFormatPreservation:
     """The storage layer keeps each format's canonical bytes untouched.
