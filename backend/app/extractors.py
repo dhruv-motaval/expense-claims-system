@@ -38,14 +38,33 @@ def _is_amount_line(line: str) -> bool:
     return bool(CURRENCY_LINE.search(line)) or bool(re.fullmatch(r"[0-9][0-9,]*(?:\.[0-9]+)?", line.strip()))
 
 
+TIME_ONLY = re.compile(r"^\d{1,2}[:.]\d{2}(?::\d{2})?\s*(?:am|pm)?$", re.I)
+
+
+def _is_date_line(line: str) -> bool:
+    return parse_date(line) is not None
+
+
+def _is_time_line(line: str) -> bool:
+    return bool(TIME_ONLY.fullmatch(line.strip()))
+
+
+def _is_header_noise(line: str) -> bool:
+    """Date-only, time-only, or pure-amount lines are not merchant names."""
+    return _is_amount_line(line) or _is_time_line(line) or parse_date(line) is not None
+
+
 def extract_from_text(text: str) -> ExtractedReceipt:
     lines = [l.strip() for l in (text or "").splitlines() if l.strip()]
     if not lines:
         raise ExtractionError("No receipt text found. Enter the claim manually.")
-    merchant = lines[0][:200]
+    # merchant: first line that is not a date/time/amount line; general rule,
+    # no receipt-specific values. Fall back to the first line when the receipt
+    # is only dates/amounts.
+    merchant = next((l for l in lines if not _is_header_noise(l)), lines[0])[:200]
     amount = parse_amount(text)
     d = parse_date(text)
-    desc_lines = [l for l in lines[1:] if not _is_amount_line(l) and parse_date(l) is None]
+    desc_lines = [l for l in lines[1:] if not _is_amount_line(l) and parse_date(l) is None and not _is_time_line(l)]
     description = max(desc_lines, key=len) if desc_lines else None  # ponytail: longest line wins
     return ExtractedReceipt(
         merchant=merchant,
