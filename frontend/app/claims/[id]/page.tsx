@@ -67,7 +67,7 @@ function AnchorPanel({ compared, matchedNumber }: { compared: Record<string, any
   );
 }
 
-/** Reviewer feedback card: the latest send-back / return-to-manager ticket. */
+/** Reviewer feedback card: the latest active send-back / return-to-manager ticket. */
 function FeedbackCard({ feedback }: { feedback: any }) {
   if (!feedback) return null;
   const fb = feedback.meta?.feedback || {};
@@ -98,6 +98,25 @@ function FeedbackCard({ feedback }: { feedback: any }) {
       </p>
     </div>
   );
+}
+
+/** Only show feedback that still requires action. A historical return ticket
+ * must disappear after the claim is resubmitted, re-approved, or paid. */
+function activeFeedback(claim: any) {
+  const feedback = claim.latest_feedback;
+  if (!feedback) return null;
+  if (claim.status === "SENT_BACK") {
+    return feedback.action === "CLAIM_SENT_BACK" ? feedback : null;
+  }
+  if (claim.status !== "SUBMITTED" || feedback.action !== "CLAIM_RETURNED_TO_MANAGER") {
+    return null;
+  }
+  const feedbackAt = new Date(feedback.created_at).getTime();
+  const superseded = (claim.audit || []).some((event: any) => {
+    const eventAt = new Date(event.created_at).getTime();
+    return eventAt > feedbackAt && ["CLAIM_SUBMITTED", "CLAIM_APPROVED", "CLAIM_PAID"].includes(event.action);
+  });
+  return superseded ? null : feedback;
 }
 
 /** Extract the anchor comparison captured in the latest duplicate-related ticket. */
@@ -218,7 +237,7 @@ export default function ClaimDetailPage() {
 
       <ErrorBox message={error} />
 
-      <FeedbackCard feedback={claim.latest_feedback} />
+      <FeedbackCard feedback={activeFeedback(claim)} />
 
       {/* receipt tier chip: where this file physically lives */}
       {claim.receipt?.storage_tier && (
