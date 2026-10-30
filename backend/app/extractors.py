@@ -157,5 +157,16 @@ async def extract_from_image(content: bytes, content_type: str) -> ExtractedRece
         return ExtractedReceipt(**json.loads(answer))
     except ExtractionError:
         raise
+    except httpx.HTTPStatusError as e:
+        status = e.response.status_code
+        if status in (401, 403):
+            raise ExtractionError("AI extraction is not authorized. Check that AI_API_KEY is valid and enabled for Gemini.")
+        if status == 429:
+            raise ExtractionError("AI extraction is temporarily rate-limited. Try again later or enter the claim manually.")
+        raise ExtractionError(f"AI extraction service returned HTTP {status}. Enter the claim manually.")
+    except (httpx.TimeoutException, httpx.RequestError):
+        raise ExtractionError("AI extraction service could not be reached. Check the backend connection or enter the claim manually.")
+    except (KeyError, IndexError, json.JSONDecodeError, ValueError):
+        raise ExtractionError("AI returned an unreadable receipt response. Enter the claim manually.")
     except Exception:
         raise ExtractionError("Receipt extraction failed. Enter the claim manually.")
