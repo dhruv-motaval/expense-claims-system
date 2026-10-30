@@ -17,10 +17,14 @@ export default function StaffDashboard() {
 
   return (
     <Shell>
-      <div className="flex justify-between items-center mb-4">
-        <h1 className="text-xl font-bold">My Dashboard</h1>
-        <Link href="/claims/new" className="bg-blue-600 text-white rounded px-4 py-2 text-sm font-medium hover:bg-blue-700">
-          + New Claim
+      <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <p className="text-xs font-bold uppercase tracking-widest text-blue-600">Overview</p>
+          <h1 className="mt-1 text-2xl font-bold tracking-tight text-slate-900">My Dashboard</h1>
+          <p className="mt-1 text-sm text-slate-500">Track your expenses, approvals, and payments.</p>
+        </div>
+        <Link href="/claims/new" className="inline-flex items-center justify-center rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 hover:shadow focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <span className="mr-1 text-lg leading-none">+</span> New Claim
         </Link>
       </div>
       {error && <p className="text-red-600">{error}</p>}
