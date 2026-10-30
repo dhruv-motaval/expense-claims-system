@@ -62,19 +62,41 @@ def get_storage_backend():
     if _storage_instance is not None:
         return _storage_instance
 
+    from .storage import S3Storage
+
+    # When MinIO is configured it is the HOT object store, even though
+    # STORAGE_BACKEND remains "local" for backwards-compatible local-disk
+    # deployments. This keeps the compose setup aligned with the tiered design.
+    if MINIO_ENDPOINT:
+        _storage_instance = S3Storage(
+            bucket_name=MINIO_BUCKET_NAME,
+            region=AWS_REGION,
+            key_prefix=S3_KEY_PREFIX,
+            endpoint_url=MINIO_ENDPOINT,
+            access_key=MINIO_ACCESS_KEY,
+            secret_key=MINIO_SECRET_KEY,
+        )
+        _ensure_bucket(_storage_instance)
+        return _storage_instance
+
     if STORAGE_BACKEND == "s3":
         if not S3_BUCKET_NAME:
             raise ValueError("S3_BUCKET_NAME must be set when STORAGE_BACKEND=s3")
-        from .storage import S3Storage
-
         _storage_instance = S3Storage(bucket_name=S3_BUCKET_NAME, region=AWS_REGION,
                                       key_prefix=S3_KEY_PREFIX)
         return _storage_instance
-    else:
-        from .storage import LocalStorage
 
-        _storage_instance = LocalStorage(storage_dir=STORAGE_DIR)
-        return _storage_instance
+    from .storage import LocalStorage
+    _storage_instance = LocalStorage(storage_dir=STORAGE_DIR)
+    return _storage_instance
+
+
+def _ensure_bucket(storage):
+    """Create a configured S3-compatible hot bucket if it does not exist."""
+    try:
+        storage.s3.head_bucket(Bucket=storage.bucket_name)
+    except Exception:
+        storage.s3.create_bucket(Bucket=storage.bucket_name)
 
 
 def get_cold_storage():
