@@ -123,7 +123,10 @@ class S3Storage(StorageBackend):
             raise RuntimeError('boto3 is required for S3 storage backend')
         self.bucket_name = bucket_name
         self.region = region
-        self.sse = sse
+        # MinIO's local development server does not provide AWS KMS/SSE
+        # configuration. Keep SSE for real AWS S3, but omit it for an
+        # S3-compatible endpoint unless that endpoint explicitly supports it.
+        self.sse = sse if endpoint_url is None else None
         self.key_prefix = key_prefix.strip('/')
         # MinIO (or any S3-compatible object store) is addressed via endpoint_url;
         # None keeps the real AWS endpoint. Credentials only passed when overriding.
@@ -133,6 +136,12 @@ class S3Storage(StorageBackend):
         self.s3 = boto3.client('s3', region_name=region, endpoint_url=endpoint_url,
                                config=boto3.session.Config(signature_version='s3v4'),
                                **session_kwargs)
+
+    def _put_args(self, content_type: str) -> dict:
+        args = {'ContentType': content_type}
+        if self.sse:
+            args['ServerSideEncryption'] = self.sse
+        return args
 
     def _make_key(self, ext: str) -> str:
         unique = f'{uuid.uuid4().hex}.{ext.lstrip(".")}'
@@ -146,27 +155,27 @@ class S3Storage(StorageBackend):
             'application/pdf': 'pdf',
         }.get(content_type, 'bin')
         key = self._make_key(ext)
-        extra_args = {'ContentType': content_type, 'ServerSideEncryption': self.sse}
-        self.s3.put_object(Bucket=self.bucket_name, Key=key, Body=content, **extra_args)
+        self.s3.put_object(Bucket=self.bucket_name, Key=key, Body=content,
+                            **self._put_args(content_type))
         return StoredObject(key=key, content_type=content_type, size=len(content))
 
     def upload_text(self, content: bytes, suffix: str = 'txt') -> StoredObject:
         key = self._make_key(suffix)
-        extra_args = {'ContentType': 'text/plain', 'ServerSideEncryption': self.sse}
-        self.s3.put_object(Bucket=self.bucket_name, Key=key, Body=content, **extra_args)
+        self.s3.put_object(Bucket=self.bucket_name, Key=key, Body=content,
+                            **self._put_args('text/plain'))
         return StoredObject(key=key)
 
     def upload_json(self, content: bytes) -> StoredObject:
         key = self._make_key('json')
-        extra_args = {'ContentType': 'application/json', 'ServerSideEncryption': self.sse}
-        self.s3.put_object(Bucket=self.bucket_name, Key=key, Body=content, **extra_args)
+        self.s3.put_object(Bucket=self.bucket_name, Key=key, Body=content,
+                            **self._put_args('application/json'))
         return StoredObject(key=key)
 
     def upload_artifact(self, receipt_id: int, suffix: str, content: bytes, content_type: str) -> StoredObject:
         suffix = suffix.lstrip('/')
         key = f'{self.key_prefix}/{receipt_id}/{suffix}'
-        extra_args = {'ContentType': content_type, 'ServerSideEncryption': self.sse}
-        self.s3.put_object(Bucket=self.bucket_name, Key=key, Body=content, **extra_args)
+        self.s3.put_object(Bucket=self.bucket_name, Key=key, Body=content,
+                            **self._put_args(content_type))
         return StoredObject(key=key, content_type=content_type, size=len(content))
 
     def get_object(self, key: str) -> bytes:
