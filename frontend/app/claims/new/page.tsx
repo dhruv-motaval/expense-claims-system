@@ -44,6 +44,7 @@ export default function NewClaimPage() {
         merchant: d.merchant || "", transaction_date: d.date || "",
         category: d.category || "OTHER", amount: d.amount ?? "",
         currency: d.currency || "INR", description: d.description || "",
+        receipt_no: d.receipt_no || "", trans_time: d.time || "",
       });
       setMatches(d.duplicate_matches || []);
       setReceiptId(d.receipt_id);
@@ -65,6 +66,7 @@ export default function NewClaimPage() {
         merchant: d.merchant || "", transaction_date: d.date || "",
         category: d.category || "OTHER", amount: d.amount ?? "",
         currency: d.currency || "INR", description: d.description || "",
+        receipt_no: d.receipt_no || "", trans_time: d.time || "",
       });
       setMatches(d.duplicate_matches || []);
       setReceiptId(d.receipt_id);
@@ -229,6 +231,22 @@ export default function NewClaimPage() {
                 <input type="number" min="0.01" step="0.01" value={form.amount}
                   onChange={(e) => setForm({ ...form, amount: e.target.value })}
                   className="w-full border rounded px-3 py-2" required />
+              </label>
+              <label className="text-sm">
+                <span className="block font-medium mb-1">
+                  Receipt No.
+                  <span className="block text-xs font-normal text-gray-500">Duplicate checks match on this — type it exactly as printed</span>
+                </span>
+                <input value={form.receipt_no || ""} onChange={(e) => setForm({ ...form, receipt_no: e.target.value })}
+                  placeholder="e.g. UB984213X" className="w-full border rounded px-3 py-2 font-mono font-medium" />
+              </label>
+              <label className="text-sm">
+                <span className="block font-medium mb-1">
+                  Time
+                  <span className="block text-xs font-normal text-gray-500">Transaction time (HH:MM or like 2:30 pm)</span>
+                </span>
+                <input value={form.trans_time || ""} onChange={(e) => setForm({ ...form, trans_time: e.target.value })}
+                  placeholder="e.g. 14:22" className="w-full border rounded px-3 py-2 font-mono font-medium" />
               </label>
             </div>
             <label className="text-sm block">

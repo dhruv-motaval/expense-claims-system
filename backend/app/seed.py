@@ -20,16 +20,25 @@ DEMO_PASSWORD = os.getenv("DEMO_PASSWORD", "password123")  # ponytail: demo-only
 
 def make_receipt(db, text: str) -> Receipt:
     lines = [l.strip() for l in text.splitlines() if l.strip()]
-    from .duplicates import parse_amount, parse_date
+    from .duplicates import parse_amount, parse_date, normalize_receipt_no, normalize_time
+    from .extractors import extract_from_text
     merchant = lines[0]
     amount = parse_amount(text)
     d = parse_date(text)
     desc = lines[1] if len(lines) > 1 else None
+    try:
+        ex = extract_from_text(text)
+        rn, tt = ex.receipt_no, ex.time
+    except Exception:
+        rn = tt = None
     return Receipt(
         source_type="TEXT", original_text=text, merchant=merchant, receipt_date=d,
         amount=amount, currency="INR", raw_extracted_text=text,
         normalized_hash=content_hash(text),
         content_hash=fingerprint(merchant, d, amount, "INR", desc),
+        receipt_no=normalize_receipt_no(rn),
+        trans_time=normalize_time(tt),
+        storage_tier="HOT",
     )
 
 
@@ -77,7 +86,7 @@ def run():
 
     by_email = {u.email: u for u in db.scalars(select(User))}
     neha, riya, vikram = by_email["neha@example.com"], by_email["riya@example.com"], by_email["vikram@example.com"]
-    today = date.today().replace(day=min(date.today().day, 27))
+    today = date.today()
 
     # Neha near-limit scenario: 18,700 approved/paid this month, limit 20,000
     make_claim(db, neha, 1, "Marriott Hotel", today, "ACCOMMODATION", 9500, "Client visit stay", Status.PAID, actor=arjun)
@@ -93,8 +102,10 @@ def run():
     # Manager's own claim (self-approval demo)
     make_claim(db, arjun, 8, "Taj Hotel", today, "ACCOMMODATION", 12000, "Conference stay", Status.SUBMITTED)
 
-    # Duplicate scenario: original Uber 320 paid, duplicate wording arrives as draft
-    orig_receipt = make_receipt(db, "UBER\n12 Aug 2026\nTrip to Airport\n₹320")
+    # Duplicate scenario: original Uber 320 paid, duplicate wording arrives as
+    # draft. Both carry anchor UB984213X — tier B (same receipt no) hard-blocks
+    # that payment even though the text is reworded.
+    orig_receipt = make_receipt(db, "UBER\n12 Aug 2026\nTrip to Airport\n₹320\nReceipt No: UB984213X\nTime: 14:22")
     db.add(orig_receipt)
     db.flush()
     make_claim(db, riya, 9, "Uber", date(today.year, 8, 12), "TAXI", 320, "Trip to Airport",
@@ -103,8 +114,15 @@ def run():
     dup_receipt = make_receipt(db, "Uber Technologies\n12/08/26\nAirport ride\nINR 320.00")
     db.add(dup_receipt)
     db.flush()
-    make_claim(db, vikram, 10, "Uber Technologies", today, "TAXI", 320, "Airport ride", Status.DRAFT,
-               receipt=dup_receipt)
+    dup = make_claim(db, vikram, 10, "Uber Technologies", today, "TAXI", 320, "Airport ride",
+                     Status.DRAFT, receipt=dup_receipt)
+    # seeded draft anchors: same receipt no as the already-paid Uber above
+    from .duplicates import normalize_receipt_no, normalize_time
+    dup.receipt_no = normalize_receipt_no("UB984213X")
+    orig = db.scalar(select(Claim).where(Claim.claim_number == "CLM-1009"))
+    if orig:
+        orig.receipt_no = normalize_receipt_no("UB984213X")
+        orig.trans_time = normalize_time("14:22")
 
     db.commit()
     print("Seeded 5 users, 10 claims. Login: neha@example.com / password123")

@@ -5,18 +5,64 @@ Score >= 85 strong duplicate, 65-84 possible, below 65 no match.
 """
 import hashlib
 import re
-from datetime import date, datetime
+from datetime import date, datetime, time
 from difflib import SequenceMatcher
 
 from sqlalchemy import select
 
-from .models import Claim
+from .models import Claim, Receipt
 
 CURRENCY_TOKEN = re.compile(r"(?:₹|rs\.?|inr)\s*([0-9][0-9,]*(?:\.[0-9]+)?)", re.I)
 NUMBER = re.compile(r"[0-9][0-9,]*(?:\.[0-9]+)?")
 NONWORD = re.compile(r"[^a-z0-9\s]")
 WS = re.compile(r"\s+")
 MERCHANT_NOISE = re.compile(r"\b(technologies|pvt|ltd|limited|inc|cabs|india|the)\b")
+
+# receipt-number normalization: uppercase, strip spaces/punctuation and common
+# label prefixes ("NO", "INV", "#"). One helper used on WRITE by extractor, API,
+# seed and tests — matching is then pure equality (no tolerance windows).
+RECEIPT_NO_PREFIX = re.compile(
+    r"^\s*(?:(?:receipt|invoice|tax\s*invoice|bill|trip|ref|offer|token)\s*[-: \t]*\s*)?"
+    r"(?:(?:no|num(?:ber)?)\s*\.?\s*|#!)\s*[-:# \t]*",
+    re.I)
+RECEIPT_NO_JUNK = re.compile(r"[^a-z0-9]+", re.I)
+
+
+def normalize_receipt_no(v: str | None) -> str | None:
+    v = (v or "").strip().upper()
+    if not v:
+        return None
+    stripped = RECEIPT_NO_PREFIX.sub("", v, count=1).strip()
+    v = stripped or v
+    v = RECEIPT_NO_JUNK.sub("", v)
+    return v or None
+
+
+def normalize_time(v) -> str | None:
+    """Minute-truncated canonical time string (fetch two receipts printing the same
+    moment and they compare equal): '14:22:05' -> '14:22', '2:30 pm' -> '14:30'.
+
+    Matching is pure equality afterwards — no proximity windows. Returns None when
+    the value can't be interpreted, and the caller must treat that as "anchor absent"
+    rather than "mismatch"."""
+    if v is None:
+        return None
+    if isinstance(v, time):
+        return v.strftime("%H:%M")
+    if isinstance(v, datetime):
+        return v.strftime("%H:%M")
+    s = str(v).strip().lower().replace(".", ":").replace(" ", "")
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})(?::\d{2})?(am|pm)?", s)
+    if not m:
+        return None
+    hh, mm, suffix = int(m[1]), int(m[2]), m[3]
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        return None
+    if suffix == "pm" and hh < 12:
+        hh += 12
+    elif suffix == "am" and hh == 12:
+        hh = 0
+    return f"{hh:02d}:{mm:02d}"
 
 # ponytail: dd/mm assumed for numeric dates (Indian receipts); flip if mm/dd shows up
 DATE_PATTERNS = [
@@ -152,10 +198,89 @@ def find_duplicates(db, data: dict, exclude_id: int | None = None) -> list[dict]
     return out
 
 
-def has_paid_duplicate(db, claim: Claim) -> bool:
-    data = claim_data(claim)
-    stmt = select(Claim).where(Claim.status == "PAID", Claim.id != claim.id)
-    return any(similarity(data, claim_data(c)) >= 65 for c in db.scalars(stmt))
+# --- tiered identity matching (payment gate) -------------------------------
+# Identity keys decide, fuzzy only advises. Tiers per docs/FINAL-DESIGN.md §B7:
+#   A: same file bytes (checksum_sha256 vs a PAID receipt)          -> hard block
+#   B: same receipt no (normalized (merchant, receipt_no) vs PAID)  -> hard block
+#   C: same transaction (merchant+date+amount+time?) vs PAID, receipt numbers
+#      not both-present-equal (those would have been tier B)        -> Finance gate
+#   D: fuzzy weighted score                                         -> advisory chip
+# All comparisons are strict equality after one normalization step. A missing
+# anchor is "absent", never "mismatch": it only weakens the tier, never fakes one.
+
+TIER_A = "A"   # same file
+TIER_B = "B"   # same receipt number
+TIER_C = "C"   # same transaction (no receipt-no collision)
+TIER_D = "D"   # fuzzy advisory only
+
+
+def _anchor_row(c: Claim) -> dict:
+    return {
+        "merchant": normalize_merchant(c.merchant),
+        "date": c.transaction_date,
+        "amount": float(c.amount) if c.amount is not None else None,
+        "receipt_no": normalize_receipt_no(c.receipt_no),
+        "trans_time": normalize_time(c.trans_time),
+    }
+
+
+def anchor_compare(this: Claim, other: Claim) -> dict:
+    """Every anchor with raw + normalized values and equality — rendered by both
+    the UI comparison card and the payment ticket, so they never lie apart."""
+    def cell(raw_this, raw_other, norm_eq):
+        return {"this": raw_this, "other": raw_other, "equal": bool(norm_eq)}
+
+    def iseq(a, b):
+        return a is not None and b is not None and a == b
+
+    t_this, t_other = normalize_time(this.trans_time), normalize_time(other.trans_time)
+    return {
+        "receipt_no": cell(this.receipt_no, other.receipt_no, iseq(normalize_receipt_no(this.receipt_no),
+                                                                   normalize_receipt_no(other.receipt_no))),
+        "time": cell(this.trans_time, other.trans_time, iseq(t_this, t_other)),
+        "date": cell(this.transaction_date.isoformat(), other.transaction_date.isoformat(),
+                     this.transaction_date == other.transaction_date),
+        "amount": cell(float(this.amount), float(other.amount),
+                       abs(float(this.amount) - float(other.amount)) < 0.01),
+        "merchant": cell(this.merchant, other.merchant,
+                         normalize_merchant(this.merchant) == normalize_merchant(other.merchant)),
+    }
+
+
+def identity_match(db, claim: Claim) -> tuple[str | None, Claim | None, dict]:
+    """Compare this claim against PAID claims only (money already left).
+
+    Returns (tier, matched_claim, compared_anchors); tier None when nothing matched
+    strongly enough to matter at payment. Errors on the inputs (no date etc.) leave
+    the tier mechanism working with whatever anchors exist."""
+    if claim.status == "PAID":
+        return None, None, {}
+    own = _anchor_row(claim)
+
+    # Tier A first: same canonical bytes — the one sort of match no rewording can beat.
+    checksum = claim.receipt.checksum_sha256 if claim.receipt else None
+    if checksum:
+        a_id = db.scalar(select(Claim.id).join(Receipt, Claim.receipt_id == Receipt.id).where(
+            Claim.status == "PAID", Claim.id != claim.id,
+            Receipt.checksum_sha256 == checksum))
+        if a_id is not None:
+            c = db.get(Claim, a_id)
+            return TIER_A, c, anchor_compare(claim, c)
+
+    for c in db.scalars(select(Claim).where(Claim.status == "PAID", Claim.id != claim.id)):
+        row = _anchor_row(c)
+
+        # Tier B: same normalized receipt number — the number identifies one
+        # printed receipt regardless of how the merchant string was reworded.
+        if own["receipt_no"] and row["receipt_no"] == own["receipt_no"]:
+            return TIER_B, c, anchor_compare(claim, c)
+
+        # Tier C: same transaction quartet, receipt numbers not both-present-equal.
+        core_eq = (row["merchant"] == own["merchant"] and row["date"] == own["date"]
+                   and row["amount"] is not None and abs(row["amount"] - own["amount"]) < 0.01)
+        if core_eq:
+            return TIER_C, c, anchor_compare(claim, c)
+    return None, None, {}
 
 
 def match_dict(match: dict) -> dict:
@@ -170,3 +295,10 @@ def match_dict(match: dict) -> dict:
         "score": match["score"],
         "level": match["level"],
     }
+
+
+def duplicate_flags(db, claim: Claim, exclude_id: int | None = None) -> list[dict]:
+    """Advisory duplicate chips for any claim context (queue cards) — tier D only:
+    never used to block anything, just to render warnings."""
+    data = claim_data(claim)
+    return [match_dict(m) for m in find_duplicates(db, data, exclude_id=exclude_id)]

@@ -14,5 +14,25 @@ services:
       interval: 2s
       retries: 15
 
+  # Hot tier object store. Active claims live here; the paid-cache/ prefix
+  # holds post-payment copies that the app's lifecycle rule expires after
+  # PAID_CACHE_DAYS. The S3 cold archive is real AWS, so it is NOT in compose.
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || exit 1"]
+      interval: 3s
+      retries: 15
+
 volumes:
   pgdata:
+  miniodata:

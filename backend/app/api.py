@@ -8,7 +8,8 @@ from . import db as db_config
 from .db import STORAGE_DIR, get_db
 from .deps import current_user, require_role
 from .models import Claim, Role, User, Receipt
-from .schemas import ClaimCreate, ClaimUpdate, LoginIn
+from .schemas import (ClaimCreate, ClaimUpdate, LoginIn, PayIn, RejectIn,
+                      ReturnToManagerIn, SentBackIn)
 from .storage import get_storage
 
 router = APIRouter()
@@ -52,20 +53,24 @@ def receipt_image(receipt_id: int, db: Session = Depends(get_db), user: User = D
         if not receipt.s3_image_key:
             raise HTTPException(status_code=404, detail="No receipt image.")
         try:
-            content = services.get_receipt_content(db, user, receipt)
+            content, served_from = services.get_receipt_content(db, user, receipt)
         except HTTPException:
             raise
         except Exception:
             raise HTTPException(status_code=404, detail="No receipt image.")
         ct = mimetypes.guess_type(receipt.s3_image_key or "")[0] or "application/octet-stream"
+        services.log_file_access(db, user, receipt, served_from=served_from)
         return Response(content=content, media_type=ct)
     else:
         key = receipt.image_path or receipt.s3_image_key
         if not key:
             raise HTTPException(status_code=404, detail="No receipt image.")
-        path = os.path.join(STORAGE_DIR, key)
-        if not os.path.exists(path):
+        path = os.path.realpath(os.path.join(STORAGE_DIR, key))
+        storage_root = os.path.realpath(STORAGE_DIR)
+        if not path.startswith(storage_root) or not os.path.exists(path):
+            # defense-in-depth: no key value may escape the storage root
             raise HTTPException(status_code=404, detail="No receipt image.")
+        services.log_file_access(db, user, receipt, served_from="hot")
         return FileResponse(path)
 
 
@@ -105,10 +110,14 @@ def receipt_page_content(receipt_id: int, page: int, db: Session = Depends(get_d
     if not page_keys or page < 1 or page > len(page_keys):
         raise HTTPException(status_code=404, detail="No receipt pages.")
     key = page_keys[page - 1]
+    if not key.startswith(db_config.S3_KEY_PREFIX):
+        # defense-in-depth: page keys are internally generated, never trust one that escaped
+        raise HTTPException(status_code=404, detail="No receipt pages.")
     try:
         content = get_storage().get_object(key)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="No receipt pages.")
+    services.log_file_access(db, user, receipt, served_from="hot")
     return Response(content=content, media_type="image/jpeg")
 
 
@@ -157,9 +166,22 @@ def approve(claim_id: int, db: Session = Depends(get_db), user: User = Depends(c
 
 
 @claim_router.post("/{claim_id}/reject")
-def reject(claim_id: int, data: dict = None, db: Session = Depends(get_db), user: User = Depends(current_user)):
-    reason = (data or {}).get("reason", "")
-    return services.claim_dict(services.reject_claim(db, user, _get_claim(db, claim_id), reason))
+def reject(claim_id: int, data: RejectIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    return services.claim_dict(services.reject_claim(db, user, _get_claim(db, claim_id), data.reason))
+
+
+@claim_router.post("/{claim_id}/send-back")
+def send_back(claim_id: int, data: SentBackIn, db: Session = Depends(get_db),
+              user: User = Depends(current_user)):
+    """Manager: send a submitted claim back to staff for revision."""
+    return services.claim_dict(services.send_back_claim(db, user, _get_claim(db, claim_id), data))
+
+
+@claim_router.post("/{claim_id}/return-to-manager")
+def return_to_manager(claim_id: int, data: ReturnToManagerIn, db: Session = Depends(get_db),
+                      user: User = Depends(current_user)):
+    """Finance: return an approved claim to its manager for re-review."""
+    return services.claim_dict(services.return_to_manager(db, user, _get_claim(db, claim_id), data))
 
 
 @claim_router.post("/{claim_id}/return-to-draft")
@@ -168,8 +190,9 @@ def back_to_draft(claim_id: int, db: Session = Depends(get_db), user: User = Dep
 
 
 @claim_router.post("/{claim_id}/pay")
-def pay(claim_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
-    return services.claim_dict(services.pay_claim(db, user, _get_claim(db, claim_id)))
+def pay(claim_id: int, data: PayIn | None = None, db: Session = Depends(get_db),
+        user: User = Depends(current_user)):
+    return services.claim_dict(services.pay_claim(db, user, _get_claim(db, claim_id), data))
 
 
 @router.get("/dashboard/staff")

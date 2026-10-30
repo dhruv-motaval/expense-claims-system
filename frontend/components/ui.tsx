@@ -3,12 +3,23 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { setToken, useMe } from "@/lib/auth";
-import { STATUS_COLORS } from "@/lib/format";
+import { STATUS_COLORS, STATUS_LABELS, tierMeta } from "@/lib/format";
 
 export function StatusBadge({ status }: { status: string }) {
   return (
-    <span className={`inline-block px-2 py-0.5 rounded text-xs font-semibold ${STATUS_COLORS[status] || "bg-gray-100"}`}>
-      {status}
+    <span className={`inline-block px-2 py-0.5 rounded text-xs font-semibold ${STATUS_COLORS[status] || "bg-gray-100"}`}
+      title={status === "SENT_BACK" ? "A reviewer returned this claim for you to fix and resubmit" : undefined}>
+      {STATUS_LABELS[status] || status}
+    </span>
+  );
+}
+
+export function TierBadge({ tier }: { tier: string | null | undefined }) {
+  const meta = tierMeta(tier);
+  if (!meta) return null;
+  return (
+    <span className={`inline-block px-2 py-0.5 rounded text-xs font-semibold ${meta.cls}`} title={meta.title}>
+      {meta.label}
     </span>
   );
 }

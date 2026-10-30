@@ -97,7 +97,11 @@ def test_full_lifecycle_draft_edit_submit_approve_pay(c):
     assert c.post(f"/api/claims/{claim['id']}/pay", headers=priya).status_code == 422
     detail = c.get(f"/api/claims/{claim['id']}", headers=riya).json()
     actions = [x["action"] for x in detail["audit"]]
-    assert actions == ["CLAIM_CREATED", "CLAIM_UPDATED", "CLAIM_SUBMITTED", "CLAIM_APPROVED", "CLAIM_PAID"]
+    # lifecycle in order; the frozen patch attempt also writes a ticket now
+    assert actions[:5] == ["CLAIM_CREATED", "CLAIM_UPDATED", "CLAIM_SUBMITTED", "CLAIM_APPROVED", "CLAIM_PAID"]
+    assert "CLAIM_EDIT_BLOCKED" in actions  # edit attempt on a PAID claim is audited
+    blocked_ticket = next(x for x in detail["audit"] if x["action"] == "CLAIM_EDIT_BLOCKED")
+    assert blocked_ticket["meta"]["status"] == "PAID"
 
 
 def test_rejection_loop_back_to_draft(c):

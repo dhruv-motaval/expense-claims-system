@@ -21,4 +21,26 @@ export const STATUS_COLORS: Record<string, string> = {
   APPROVED: "bg-emerald-100 text-emerald-800",
   REJECTED: "bg-red-100 text-red-800",
   PAID: "bg-violet-100 text-violet-800",
+  SENT_BACK: "bg-orange-100 text-orange-800",
 };
+
+export const STATUS_LABELS: Record<string, string> = {
+  DRAFT: "Draft",
+  SUBMITTED: "Submitted",
+  APPROVED: "Approved",
+  REJECTED: "Rejected",
+  PAID: "Paid",
+  SENT_BACK: "Returned for revision",
+};
+
+/** Duplicate tier chips: identity tiers block/gate, D is advisory only. */
+export const TIER_META: Record<string, { label: string; cls: string; title: string }> = {
+  A: { label: "Duplicate A · same file", cls: "bg-red-100 text-red-800", title: "The exact same receipt file has already been paid (checksum match). Payment is blocked." },
+  B: { label: "Duplicate B · same receipt no.", cls: "bg-red-100 text-red-800", title: "This receipt number has already been paid. Payment is blocked." },
+  C: { label: "Duplicate C · same transaction", cls: "bg-amber-100 text-amber-800", title: "Same merchant, date and amount were already paid. Payment requires a typed justification." },
+  D: { label: "Possible duplicate", cls: "bg-amber-50 text-amber-700", title: "Strong textual similarity to an existing claim. Advisory only — does not block payment." },
+};
+
+export function tierMeta(tier: string | null | undefined) {
+  return tier ? TIER_META[tier] : null;
+}

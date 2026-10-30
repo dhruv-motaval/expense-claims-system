@@ -36,6 +36,7 @@ class Status(str, enum.Enum):
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
     PAID = "PAID"
+    SENT_BACK = "SENT_BACK"  # Returned for revision (manager send-back)
 
 
 class SourceType(str, enum.Enum):
@@ -87,6 +88,14 @@ class Receipt(Base):
     raw_extracted_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     normalized_hash: Mapped[str] = mapped_column(String(64), default="")
     content_hash: Mapped[str] = mapped_column(String(64), default="")
+    # duplicate-proof anchors (same normalization discipline as claims)
+    receipt_no: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    trans_time: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    # storage tiering: HOT (local/MinIO, active), COLD (S3 after payment);
+    # paid_cache_key points at the MinIO paid-cache/<id>/... copy that lifecycle
+    # expires PAID_CACHE_DAYS after payment.
+    storage_tier: Mapped[str] = mapped_column(String(8), default="HOT")
+    paid_cache_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     user = relationship("User", back_populates="receipts")
@@ -106,6 +115,9 @@ class Claim(Base):
     status: Mapped[str] = mapped_column(String(20), default=Status.DRAFT.value, index=True)
     receipt_id: Mapped[int | None] = mapped_column(ForeignKey("receipts.id"), nullable=True)
     rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # duplicate-proof anchors (extracted or user-entered; normalized on write)
+    receipt_no: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    trans_time: Mapped[str | None] = mapped_column(String(8), nullable=True)  # "HH:MM" from datetime.time.isoformat
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

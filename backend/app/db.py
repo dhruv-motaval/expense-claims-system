@@ -24,6 +24,21 @@ S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 S3_KEY_PREFIX = os.getenv("S3_KEY_PREFIX", "receipts")
 UPLOAD_MAX_SIZE_MB = int(os.getenv("UPLOAD_MAX_SIZE_MB", "10"))
+
+# --- tiered storage (docs/FINAL-DESIGN.md Part C) ---------------------------
+# Hot tier: local disk (or MinIO) serves active claims. Cold tier: S3 holds the
+# archive after payment. MinIO keeps a paid-cache/ copy for PAID_CACHE_DAYS
+# after payment so recently-paid receipts still serve from local storage; the
+# MinIO lifecycle rule expires that prefix on its own.
+COLD_S3_BUCKET_NAME = os.getenv("COLD_S3_BUCKET_NAME") or S3_BUCKET_NAME
+S3_STORAGE_CLASS = os.getenv("S3_STORAGE_CLASS", "STANDARD_IA")   # paid archive class
+# MinIO doubles as the hot object store when configured (S3 API compatible).
+MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT")                      # e.g. http://localhost:9000
+MINIO_ACCESS_KEY = os.getenv("MINIO_ROOT_USER") or os.getenv("MINIO_ACCESS_KEY") or ""
+MINIO_SECRET_KEY = os.getenv("MINIO_ROOT_PASSWORD") or os.getenv("MINIO_SECRET_KEY") or ""
+MINIO_BUCKET_NAME = os.getenv("MINIO_BUCKET_NAME", "receipts-hot")
+PAID_CACHE_DAYS = int(os.getenv("PAID_CACHE_DAYS", "7"))
+PAID_CACHE_PREFIX = "paid-cache"
 PRESIGNED_URL_EXPIRES = int(os.getenv("PRESIGNED_URL_EXPIRES", "300"))
 
 
@@ -60,3 +75,11 @@ def get_storage_backend():
 
         _storage_instance = LocalStorage(storage_dir=STORAGE_DIR)
         return _storage_instance
+
+
+def get_cold_storage():
+    """The archive (cold) S3 backend — always S3-compatible, never local."""
+    from .storage import S3Storage
+    if not COLD_S3_BUCKET_NAME:
+        raise ValueError("COLD_S3_BUCKET_NAME (or S3_BUCKET_NAME) must be set for cold tier")
+    return S3Storage(bucket_name=COLD_S3_BUCKET_NAME, region=AWS_REGION)

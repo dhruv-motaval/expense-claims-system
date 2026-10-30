@@ -57,6 +57,19 @@ export async function api(path: string, options: RequestInit = {}) {
     throw new Error("Not authenticated");
   }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || `Request failed (${res.status})`);
+  if (!res.ok) {
+    // 422 validation errors arrive as a FastAPI detail array; 409s carry
+    // plain strings. Flatten both into one readable message.
+    let msg = data.detail;
+    if (Array.isArray(msg)) {
+      msg = msg.map((d: any) => {
+        const where = (d.loc || []).filter((p: any) => p !== "body" && typeof p !== "number").join(".");
+        return `${where ? where + ": " : ""}${d.msg}`;
+      }).join("; ");
+    } else if (msg && typeof msg === "object") {
+      msg = JSON.stringify(msg);
+    }
+    throw new Error(msg || `Request failed (${res.status})`);
+  }
   return data;
 }

@@ -3,25 +3,46 @@ import hashlib
 import hmac
 import json
 import os
-from datetime import date, datetime, timedelta, timezone
+import time as _time
+from datetime import date, datetime, time as dtime, timedelta, timezone
 
 from fastapi import HTTPException, UploadFile
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from . import db as db_config
-from .duplicates import (content_hash, fingerprint, find_duplicates, has_paid_duplicate,
-                         match_dict, normalize_merchant, parse_date, categorize, parse_amount)
+from .duplicates import (content_hash, fingerprint, find_duplicates, identity_match,
+                         match_dict, normalize_merchant, normalize_receipt_no, normalize_time,
+                         parse_date, categorize, parse_amount,
+                         anchor_compare, TIER_A, TIER_B, TIER_C, TIER_D)
 from .extractors import ExtractionError, extract_from_text, extract_from_image
 from .models import AuditEvent, Category, Claim, Receipt, Role, SourceType, Status, User, utcnow
-from .schemas import ClaimCreate, ClaimUpdate, ExtractedReceipt
-from .storage import get_storage
+from .schemas import (ClaimCreate, ClaimUpdate, ExtractedReceipt, PayIn, RejectIn,
+                      ReturnToManagerIn, SentBackIn)
+from .storage import get_storage, get_tiered_storage
+from .receipt_cache import cache
+
+CLAIM_FIELDS = ("merchant", "transaction_date", "trans_time", "receipt_no",
+                "category", "amount", "currency", "description")
 
 ALLOWED_TRANSITIONS = {
     Status.DRAFT: {Status.SUBMITTED},
-    Status.SUBMITTED: {Status.APPROVED, Status.REJECTED},
+    Status.SUBMITTED: {Status.APPROVED, Status.REJECTED, Status.SENT_BACK},
     Status.REJECTED: {Status.DRAFT},
-    Status.APPROVED: {Status.PAID},
+    Status.APPROVED: {Status.PAID, Status.SUBMITTED},   # Finance return-to-manager
+    Status.PAID: set(),
+    Status.SENT_BACK: {Status.DRAFT, Status.SUBMITTED},
+}
+
+# Edit whitelist: only DRAFT / REJECTED / SENT_BACK are editable (SENT_BACK is the
+# manager-granted revision window). SUBMITTED / APPROVED / PAID are frozen on the
+# server, so an approver always sees the record Finance eventually pays.
+EDITABLE_FIELDS_BY_STATUS = {
+    Status.DRAFT: set(CLAIM_FIELDS),
+    Status.REJECTED: set(CLAIM_FIELDS),
+    Status.SENT_BACK: set(CLAIM_FIELDS),
+    Status.SUBMITTED: set(),
+    Status.APPROVED: set(),
     Status.PAID: set(),
 }
 
@@ -47,8 +68,67 @@ def get_user_by_token(token: str) -> User | None:
     return SESSIONS.get(token)
 
 
-def audit(db: Session, claim_id: int, user_id: int | None, action: str, meta: dict | None = None):
-    db.add(AuditEvent(claim_id=claim_id, user_id=user_id, action=action, meta=meta))
+# --- JSON ticket engine -----------------------------------------------------
+
+def _jsonable(v):
+    """Recursively coerce DB-native types (Decimal/date/datetime) into JSON-safe
+    primitives so ticket envelopes never blow up the audit insert."""
+    from decimal import Decimal
+    if isinstance(v, Decimal):
+        return float(v)
+    if isinstance(v, (datetime, dtime)):
+        return v.isoformat()
+    if isinstance(v, date):
+        return v.isoformat()
+    if isinstance(v, dict):
+        return {k: _jsonable(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_jsonable(x) for x in v]
+    return v
+
+
+def audit(db: Session, claim: "Claim | int", actor: User | None, action: str,
+          meta: dict | None = None, *, transition: tuple[str, str] | None = None,
+          fields: dict | None = None, feedback: dict | None = None,
+          user_id: int | None = None):
+    """One JSON ticket per event, written IN THE SAME TRANSACTION as the change.
+
+    Envelope (docs/FINAL-DESIGN.md §B3): actor, transition, fields-diff, feedback.
+    Accepts legacy int claim_id + user_id for compatibility with raw seeding paths.
+    """
+    if isinstance(claim, int):
+        cid, num = claim, None
+    else:
+        cid, num = claim.id, claim.claim_number
+    envelope: dict = {}
+    if actor is not None:
+        envelope["actor"] = {"id": actor.id, "name": actor.name, "role": actor.role}
+    if user_id is not None and actor is None:
+        envelope["actor_id"] = user_id
+    if transition is not None:
+        envelope["transition"] = {"from": transition[0], "to": transition[1]}
+    for label, blob in (("fields", fields), ("feedback", feedback)):
+        if blob:
+            envelope[label] = _jsonable(blob)
+    if meta:
+        envelope.update(_jsonable(meta))
+    envelope["at"] = utcnow().isoformat()
+    envelope["claim_number"] = num
+    db.add(AuditEvent(claim_id=cid, user_id=user_id if actor is None else actor.id,
+                      action=action, meta=envelope))
+
+
+def get_ticket_feedback(db: Session, claim: Claim, actions: tuple[str, ...]) -> dict | None:
+    """Latest feedback ticket for the given actions — the current feedback IS the
+    latest ticket; feedback lives in the audit JSON, not in a new column."""
+    ev = db.scalars(select(AuditEvent).where(AuditEvent.claim_id == claim.id,
+                                             AuditEvent.action.in_(actions)
+                                             ).order_by(AuditEvent.id.desc()).limit(1)).first()
+    if not ev or not isinstance(ev.meta, dict):
+        return None
+    return {"action": ev.action, "meta": ev.meta,
+            "user_name": ev.user.name if ev.user else None,
+            "created_at": ev.created_at.isoformat()}
 
 
 def next_claim_number(db: Session) -> str:
@@ -83,18 +163,81 @@ def can_view_receipt(user: User, receipt: Receipt) -> bool:
     return False
 
 
-def get_receipt_content(db: Session, user: User, receipt: Receipt) -> bytes:
-    """Authorized retrieval of stored receipt bytes. Auth check comes first."""
+def get_receipt_content(db: Session, user: User, receipt: Receipt) -> tuple[bytes, str]:
+    """Authorized retrieval of receipt bytes through the tier routing.
+    Auth check comes first and is NEVER cached: a cache hit can only occur
+    after permission has already passed for this user's request."""
     if not can_view_receipt(user, receipt):
         raise HTTPException(status_code=403, detail="You do not have access to this receipt.")
-    storage = get_storage()
     key = receipt.s3_image_key or receipt.image_path
     if not key:
         raise HTTPException(status_code=404, detail="No receipt image.")
+    ck = f"receipt:{receipt.id}:{(receipt.checksum_sha256 or '')[:16]}" if receipt.checksum_sha256 else None
+    if ck:
+        cached = cache.get(ck)
+        if cached is not None:
+            return cached, "memory"
+    tiered = get_tiered_storage()
     try:
-        return storage.get_object(key)
+        content, served_from = tiered.get_content(
+            key, tier=getattr(receipt, "storage_tier", "HOT") or "HOT",
+            paid_cache_key=receipt.paid_cache_key)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="No receipt image.")
+    if served_from == "cold":
+        # visibility: serving straight from the archive is worth a ticket so the
+        # trail shows when the paid-cache copy is gone/expired
+        for c in db.scalars(select(Claim).where(Claim.receipt_id == receipt.id)):
+            audit(db, c, user, "COLD_TIER_ACCESSED", {
+                "receipt_id": receipt.id, "served_from": served_from,
+                "hint": "paid-cache expired or missing"})
+        db.commit()
+    if ck:
+        cache.put(ck, content)
+    return content, served_from
+
+
+def maybe_promote_on_pay(db: Session, claim: Claim, receipt: Receipt | None):
+    """After a successful pay: archive the receipt to the cold S3 tier
+    (checksum-verified) and keep a paid-cache copy for PAID_CACHE_DAYS.
+    Best-effort by design — payment never depends on promotion, and a retry
+    is safe because promote() is idempotent."""
+    if not receipt:
+        return
+    key = receipt.s3_image_key or receipt.image_path
+    if not key:
+        return
+    fname = receipt.original_filename or (key.rsplit("/", 1)[-1] if key else None) or "receipt.bin"
+    try:
+        tiered = get_tiered_storage()
+        if tiered.cold is None:
+            return
+        content = tiered.hot.get_object(key) if getattr(receipt, "storage_tier", "HOT") == "HOT" else None
+        cold_key = tiered.promote(key, receipt.id, fname, content)
+        receipt.storage_tier = "COLD"
+        receipt.paid_cache_key = None
+        try:  # paid cache only exists on an object-store hot tier (MinIO/S3)
+            paid_cache_content = content if content is not None else tiered.cold.s3.get_object(
+                Bucket=tiered.cold.bucket_name, Key=cold_key)["Body"].read()
+            receipt.paid_cache_key = tiered.put_paid_cache(receipt.id, fname, paid_cache_content)
+            tiered.apply_paid_cache_lifecycle(db_config.PAID_CACHE_DAYS)
+        except Exception:
+            receipt.paid_cache_key = None
+        db.commit()
+        for c in db.scalars(select(Claim).where(Claim.receipt_id == receipt.id)):
+            audit(db, c, claim.paid_by, "RECEIPT_ARCHIVED", {
+                "receipt_id": receipt.id, "cold_key": cold_key,
+                "storage_class": db_config.S3_STORAGE_CLASS,
+                "paid_cache_key": receipt.paid_cache_key,
+                "paid_cache_days": db_config.PAID_CACHE_DAYS})
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        # the archive failed but the payment stands: ticket the failure
+        for c in db.scalars(select(Claim).where(Claim.receipt_id == receipt.id)):
+            audit(db, c, claim.paid_by, "ARCHIVAL_FAILED", {
+                "receipt_id": receipt.id, "error": str(e)[:400]})
+        db.commit()
 
 
 # --- file type detection -------------------------------------------------
@@ -245,12 +388,6 @@ def _duplicates(db: Session, r: ExtractedReceipt) -> list[dict]:
              "amount": r.amount, "description": r.description})]
 
 
-def _duplicates(db: Session, r: ExtractedReceipt) -> list[dict]:
-    return [match_dict(m) for m in find_duplicates(
-        db, {"merchant": r.merchant, "date": r.date,
-             "amount": r.amount, "description": r.description})]
-
-
 def _ext_for(content_type: str) -> str:
     return {
         "application/pdf": "pdf",
@@ -312,7 +449,7 @@ def _store_artifacts(db: Session, user: User, extracted: ExtractedReceipt,
     extracted_payload = {**extracted.model_dump(mode="json"),
                          "extraction_status": "completed" if extracted.amount is not None else "partial"}
     if pdf_result is not None:
-        extracted_payload["page_count"] = len(pdf_result.page_images or [])
+        extracted_payload["page_count"] = pdf_result.page_count
     r = Receipt(
         user_id=user.id,
         source_type=source_type,
@@ -325,11 +462,14 @@ def _store_artifacts(db: Session, user: User, extracted: ExtractedReceipt,
         normalized_hash=content_hash(extracted.raw_text),
         content_hash=fingerprint(extracted.merchant, extracted.date, extracted.amount,
                                  extracted.currency, extracted.description),
+        receipt_no=normalize_receipt_no(extracted.receipt_no),
+        trans_time=normalize_time(extracted.time),
         original_filename=original_filename,
         content_type=content_type,
         file_size=len(content) if content else None,
         checksum_sha256=checksum,
         extracted_data=extracted_payload,
+        storage_tier="HOT",
         processing_status="completed",
     )
     db.add(r)
@@ -369,13 +509,15 @@ def _store_artifacts(db: Session, user: User, extracted: ExtractedReceipt,
 
 # --- claims --------------------------------------------------------------
 
+CREATE_ATTEMPTS = 4
+
+
 def create_claim(db: Session, user: User, data: ClaimCreate) -> Claim:
     if data.receipt_id:
         receipt = db.get(Receipt, data.receipt_id)
         if not receipt or receipt.user_id != user.id:
             raise BusinessRuleError("Invalid receipt reference.")
     claim = Claim(
-        claim_number=next_claim_number(db),
         user_id=user.id,
         merchant=data.merchant.strip(),
         transaction_date=data.transaction_date,
@@ -383,40 +525,109 @@ def create_claim(db: Session, user: User, data: ClaimCreate) -> Claim:
         amount=data.amount,
         currency=data.currency,
         description=data.description,
+        receipt_no=normalize_receipt_no(data.receipt_no),
+        trans_time=normalize_time(data.trans_time),
         receipt_id=data.receipt_id,
         status=Status.DRAFT.value,
     )
-    db.add(claim)
-    db.commit()
-    db.refresh(claim)
-    audit(db, claim.id, user.id, "CLAIM_CREATED")
-    db.commit()
-    if data.submit:
-        return submit_claim(db, user, claim)["claim"]
-    return claim
+    # claim_number comes from max(id) — under concurrency two creates can collide
+    # on the unique constraint; retry instead of a 500.
+    from sqlalchemy.exc import IntegrityError
+    lasterr: Exception | None = None
+    for _ in range(CREATE_ATTEMPTS):
+        claim.claim_number = next_claim_number(db)
+        try:
+            db.add(claim)
+            db.commit()
+            db.refresh(claim)
+            audit(db, claim, user, "CLAIM_CREATED")
+            db.commit()
+            if data.submit:
+                return submit_claim(db, user, claim)["claim"]
+            return claim
+        except IntegrityError:
+            db.rollback()
+            lasterr = None  # unique claim_number collision: retry with a fresh max
+        except Exception as e:
+            db.rollback()
+            raise
+    raise BusinessRuleError("Could not allocate a claim number, please retry.")
 
 
 def update_claim(db: Session, user: User, claim: Claim, data: ClaimUpdate) -> Claim:
-    require_claim_view(user, claim)
-    if claim.status == Status.PAID.value:
-        raise BusinessRuleError("Paid claims cannot be changed.")
-    if claim.user_id != user.id:
+    editable = EDITABLE_FIELDS_BY_STATUS.get(Status(claim.status), set())
+    attempted = set(data.model_dump(exclude_unset=True))
+    disallowed = attempted - editable
+    is_owner = claim.user_id == user.id
+    if not is_owner:
+        # Only the owner can edit. An authorized non-owner (Finance) probing a
+        # frozen claim gets the explicit frozen refusal (422), everyone else 403.
+        if disallowed and user.role == Role.FINANCE.value:
+            audit(db, claim, user, "CLAIM_EDIT_BLOCKED",
+                  {"attempted_fields": sorted(attempted), "status": claim.status})
+            db.commit()
+            raise BusinessRuleError(f"A {claim.status} claim cannot be edited. It is already decided.")
         raise HTTPException(status_code=403, detail="Only the claim owner can edit it.")
-    for field, value in data.model_dump(exclude_unset=True).items():
-        setattr(claim, field, value)
-    db.commit()
-    db.refresh(claim)
-    audit(db, claim.id, user.id, "CLAIM_UPDATED")
-    db.commit()
+    if disallowed:
+        # every editable status leaves disallowed == {} (whitelist covers all
+        # fields there), so a non-empty remainder means the status is frozen
+        audit(db, claim, user, "CLAIM_EDIT_BLOCKED",
+              {"attempted_fields": sorted(attempted), "status": claim.status})
+        db.commit()
+        why = {
+            Status.SUBMITTED.value: " It is with your reviewer \u2014 wait for approval, "
+                                    "rejection or a send-back.",
+            Status.APPROVED.value: " It is frozen after approval.",
+            Status.PAID.value: " It is already paid and immutable.",
+        }.get(claim.status, "")
+        raise BusinessRuleError(f"A {claim.status} claim cannot be edited.{why}")
+    fields_diff = {}
+    for field in attempted:
+        old = getattr(claim, field)
+        new = getattr(data, field)
+        if field in ("receipt_no",):
+            new = normalize_receipt_no(new) if new is not None else None
+        if field in ("trans_time",):
+            new = normalize_time(new) if new is not None else None
+        if (old is None and new is not None) or (old is not None and new != old):
+            fields_diff[field] = {"old": old, "new": new}
+    if fields_diff:
+        for field, ch in fields_diff.items():
+            setattr(claim, field, ch["new"])
+        db.commit()
+        db.refresh(claim)
+        audit(db, claim, user, "CLAIM_UPDATED", fields=fields_diff)
+        db.commit()
     return claim
 
 
-def transition(db: Session, claim: Claim, to: Status, actor: User, meta: dict | None = None) -> Claim:
+def transition(db: Session, claim: Claim, to: Status, actor: User,
+               meta: dict | None = None, *, feedback: dict | None = None,
+               action: str | None = None) -> Claim:
+    """CAS transition: the row is updated only if it still has the status we
+    validated against — a concurrent approve/pay/reject yields 409, never a
+    silent double transition. One ticket per transition, one commit."""
     current = Status(claim.status)
     if to not in ALLOWED_TRANSITIONS[current]:
         raise BusinessRuleError(f"Cannot move a {current.value} claim to {to.value}.")
-    claim.status = to.value
     now = utcnow()
+    values = {"status": to.value, "updated_at": now}
+    if to == Status.SUBMITTED:
+        values["submitted_at"] = now
+    elif to == Status.APPROVED:
+        values["approved_at"] = now
+        values["approved_by_id"] = actor.id
+    elif to == Status.PAID:
+        values["paid_at"] = now
+        values["paid_by_id"] = actor.id
+    res = db.execute(update(Claim).where(Claim.id == claim.id, Claim.status == current.value)
+                     .values(**values))
+    if res.rowcount != 1:
+        db.rollback()
+        raise HTTPException(status_code=409,
+                            detail="Claim was just changed by another action. Refresh and retry.")
+    db.refresh(claim)
+    claim.status = to.value
     if to == Status.SUBMITTED:
         claim.submitted_at = now
     elif to == Status.APPROVED:
@@ -426,8 +637,9 @@ def transition(db: Session, claim: Claim, to: Status, actor: User, meta: dict | 
         claim.paid_at = now
         claim.paid_by_id = actor.id
     elif to == Status.REJECTED and meta:
-        claim.rejection_reason = meta.get("reason")
-    audit(db, claim.id, actor.id, f"CLAIM_{to.value}", meta)
+        claim.rejection_reason = (meta or {}).get("reason")
+    audit(db, claim, actor, action or f"CLAIM_{to.value}", meta, transition=(current.value, to.value),
+          feedback=feedback)
     db.commit()
     db.refresh(claim)
     return claim
@@ -436,12 +648,14 @@ def transition(db: Session, claim: Claim, to: Status, actor: User, meta: dict | 
 def submit_claim(db: Session, user: User, claim: Claim) -> dict:
     if claim.user_id != user.id:
         raise HTTPException(status_code=403, detail="Only the claim owner can submit it.")
+    prior_submissions = sum(1 for a in claim.audits if a.action == "CLAIM_SUBMITTED")
     matches = find_duplicates(db, {"merchant": claim.merchant, "date": claim.transaction_date,
                                    "amount": float(claim.amount), "description": claim.description},
                               exclude_id=claim.id)
-    transition(db, claim, Status.SUBMITTED, user)
+    transition(db, claim, Status.SUBMITTED, user, {"resubmission_count": prior_submissions + 1})
     if matches:
-        audit(db, claim.id, user.id, "DUPLICATE_WARNING", {"matches": [m["claim"].claim_number for m in matches]})
+        audit(db, claim, user, "DUPLICATE_WARNING",
+              {"matches": [m["claim"].claim_number for m in matches]})
         db.commit()
     return {"claim": claim, "duplicate_matches": [match_dict(m) for m in matches]}
 
@@ -472,28 +686,126 @@ def reject_claim(db: Session, manager: User, claim: Claim, reason: str) -> Claim
     return transition(db, claim, Status.REJECTED, manager, {"reason": reason.strip()})
 
 
-def pay_claim(db: Session, finance_user: User, claim: Claim) -> Claim:
+def send_back_claim(db: Session, manager: User, claim: Claim, data: SentBackIn) -> Claim:
+    """Manager finds mistakes and sends the claim back to staff for revision.
+    This is the only path that re-opens edit rights (whitelist SENT_BACK)."""
+    if manager.role != Role.MANAGER.value:
+        raise HTTPException(status_code=403, detail="Manager access required.")
+    if claim.status != Status.SUBMITTED.value:
+        raise BusinessRuleError("Only submitted claims can be sent back for revision.")
+    if claim.user_id == manager.id:
+        raise BusinessRuleError("Managers cannot send back their own claims.")
+    if claim.user.manager_id != manager.id:
+        raise BusinessRuleError("You cannot send back claims outside your team.")
+    return transition(db, claim, Status.SENT_BACK, manager, feedback={
+        "reason": data.reason.strip(),
+        "flagged_fields": data.flagged_fields or [],
+        "comment": (data.comment or "").strip() or None,
+    })
+
+
+def return_to_manager(db: Session, finance_user: User, claim: Claim, data: ReturnToManagerIn) -> Claim:
+    """Finance pulls an APPROVED claim back into its manager's queue for re-review.
+    Finance never contacts staff directly; the manager is the gate for revision."""
     if finance_user.role != Role.FINANCE.value:
         raise HTTPException(status_code=403, detail="Finance access required.")
     if claim.status != Status.APPROVED.value:
-        raise BusinessRuleError("Only approved claims can be paid.")
-    if has_paid_duplicate(db, claim):
-        audit(db, claim.id, finance_user.id, "PAYMENT_BLOCKED")
-        db.commit()
-        raise BusinessRuleError("Payment blocked: a similar receipt has already been paid.")
-    return transition(db, claim, Status.PAID, finance_user)
+        raise BusinessRuleError("Only approved claims can be returned to the manager.")
+    feedback = {
+        "reason": data.reason.strip(),
+        "flagged_fields": data.flagged_fields or [],
+        "comment": (data.comment or "").strip() or None,
+        "assigned_to": None,
+    }
+    if claim.user and claim.user.manager:
+        feedback["assigned_to"] = {"id": claim.user.manager.id, "name": claim.user.manager.name,
+                                   "role": claim.user.manager.role}
+    return transition(db, claim, Status.SUBMITTED, finance_user, feedback=feedback,
+                      action="CLAIM_RETURNED_TO_MANAGER")
 
 
 def return_to_draft(db: Session, user: User, claim: Claim) -> Claim:
     if claim.user_id != user.id:
         raise HTTPException(status_code=403, detail="Only the claim owner can edit it.")
+    if claim.status == Status.SENT_BACK.value:
+        return transition(db, claim, Status.DRAFT, user)
     return transition(db, claim, Status.DRAFT, user)
+
+
+def pay_claim(db: Session, finance_user: User, claim: Claim, data: PayIn | None = None) -> Claim:
+    """Tiered identity gate (docs/FINAL-DESIGN.md §B7): A/B hard-block, C requires
+    a typed justification, D is advisory chips only. Final move is a CAS UPDATE."""
+    if finance_user.role != Role.FINANCE.value:
+        raise HTTPException(status_code=403, detail="Finance access required.")
+    if claim.status != Status.APPROVED.value:
+        raise BusinessRuleError("Only approved claims can be paid.")
+
+    tier, matched, compared = identity_match(db, claim)
+    if tier in (TIER_A, TIER_B):
+        audit(db, claim, finance_user, "PAYMENT_BLOCKED", {
+            "tier": tier, "basis": "checksum" if tier == TIER_A else "receipt_no",
+            "compared": compared,
+            "matched": {"claim": matched.claim_number, "merchant": matched.merchant,
+                        "date": matched.transaction_date.isoformat(),
+                        "amount": float(matched.amount), "receipt_no": matched.receipt_no},
+        })
+        db.commit()
+        raise BusinessRuleError(
+            f"Payment blocked: a similar receipt has already been paid ({matched.claim_number})."
+            + ("" if tier == TIER_A else " Same receipt number has already been paid."))
+    if tier == TIER_C and not (data and (data.justification or "").strip()):
+        audit(db, claim, finance_user, "PAYMENT_BLOCKED", {
+            "tier": tier, "basis": "transaction",
+            "hint": "pay-with-justification", "compared": compared,
+            "matched": {"claim": matched.claim_number, "receipt_no": matched.receipt_no},
+        })
+        db.commit()
+        raise BusinessRuleError(
+            f"Possible duplicate: claim {matched.claim_number} has already been paid with the same "
+            "merchant, date and amount. To pay anyway, add a justification (min 20 characters).")
+    if tier == TIER_C:
+        audit(db, claim, finance_user, "DUPLICATE_DISMISSED",
+              {"justification": data.justification.strip(), "compared": compared,
+               "matched": {"claim": matched.claim_number, "receipt_no": matched.receipt_no}})
+        db.commit()
+    paid = transition(db, claim, Status.PAID, finance_user)
+    # promotion is deliberately AFTER the committed payment: money left, even
+    # if the archive leg fails; the failure gets its own ticket.
+    try:
+        maybe_promote_on_pay(db, paid, paid.receipt)
+    except Exception:
+        pass
+    return paid
+
+
+def log_file_access(db: Session, user: User, receipt: Receipt, served_from: str = "hot"):
+    """RECEIPT_FILE_ACCESSED tickets: proof the reviewer actually opened the file.
+    Authorization must already have passed. Only claim-linked receipts are
+    ticketed (claim_id is not nullable in audit_events)."""
+    from .models import Claim as _Claim
+    linked = list(db.scalars(select(_Claim).where(_Claim.receipt_id == receipt.id)))
+    today = datetime.now(timezone.utc).date()
+    if not linked:
+        return
+    meta = {
+        "receipt_id": receipt.id,
+        "filename": receipt.original_filename or (receipt.s3_image_key or receipt.image_path),
+        "content_type": receipt.content_type,
+        "tier": getattr(receipt, "storage_tier", "HOT"),
+        "served_from": served_from,
+        "purpose": "verification",
+    }
+    for c in linked:
+        audit(db, c, user, "RECEIPT_FILE_ACCESSED", meta)
+    db.commit()
 
 
 # --- spend / limits / reports -------------------------------------------
 
 def month_bounds(ref: date | None = None) -> tuple[date, date]:
-    first = (ref or date.today()).replace(day=1)
+    # UTC-stable so billing periods don't shift at the month boundary on servers
+    # whose local timezone is not UTC.
+    first = (ref or datetime.now(timezone.utc).date()).replace(day=1)
     nxt = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
     return first, nxt
 
@@ -559,13 +871,24 @@ def finance_dashboard(db: Session, user: User) -> dict:
             Claim.user_id == u.id, Claim.status == Status.SUBMITTED.value,
             Claim.transaction_date >= first, Claim.transaction_date < nxt)) or 0),
     } for u in db.scalars(select(User))]
+    from .duplicates import identity_match
+    queue = []
+    for c in claims:
+        if c.status == Status.APPROVED.value:
+            entry = claim_dict(c)
+            tier, matched, compared = identity_match(db, c)
+            entry["duplicate_tier"] = tier
+            if tier:
+                entry["duplicate_compare"] = compared
+                entry["matched_claim_number"] = matched.claim_number if matched else None
+            queue.append(entry)
     return {
         "monthly_spend": approved_spend,
         "awaiting_payment": awaiting,
         "paid_this_month": paid_spend,
         "over_limit": sum(1 for e in employees if e["status"] == "OVER_LIMIT"),
         "employees": employees,
-        "payment_queue": [claim_dict(c) for c in claims if c.status == Status.APPROVED.value],
+        "payment_queue": queue,
         "categories": spend_by_category(db),
     }
 
@@ -599,6 +922,7 @@ def claim_dict(c: Claim) -> dict:
         "user_name": c.user.name if c.user else None, "merchant": c.merchant,
         "transaction_date": c.transaction_date.isoformat(), "category": c.category,
         "amount": float(c.amount), "currency": c.currency, "description": c.description,
+        "receipt_no": c.receipt_no, "trans_time": c.trans_time,
         "status": c.status, "rejection_reason": c.rejection_reason,
         "has_receipt_image": bool(c.receipt and (c.receipt.image_path or c.receipt.s3_image_key)),
         "submitted_at": c.submitted_at.isoformat() if c.submitted_at else None,
@@ -624,7 +948,14 @@ def claim_detail(db: Session, user: User, claim: Claim) -> dict:
             "processing_status": claim.receipt.processing_status,
             "extracted_data": claim.receipt.extracted_data,
             "has_pages": bool(claim.receipt.s3_pages_keys),
+            "storage_tier": getattr(claim.receipt, "storage_tier", "HOT"),
         }
+    d["latest_feedback"] = get_ticket_feedback(
+        db, claim, ("CLAIM_SENT_BACK", "CLAIM_RETURNED_TO_MANAGER"))
+    d["duplicate_tier"] = None
+    tier, _, compared = identity_match(db, claim)
+    if tier:
+        d["duplicate_tier"] = tier
     d["audit"] = [{
         "action": a.action, "meta": a.meta,
         "user_name": a.user.name if a.user else None,
