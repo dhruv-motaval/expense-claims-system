@@ -18,7 +18,9 @@ services:
   # holds post-payment copies that the app's lifecycle rule expires after
   # PAID_CACHE_DAYS. The S3 cold archive is real AWS, so it is NOT in compose.
   minio:
-    image: minio/minio:latest
+    # The upstream minio/minio Docker Hub image was retired. Chainguard
+    # publishes the compatible MinIO server image for local development.
+    image: cgr.dev/chainguard/minio:latest
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: minioadmin
@@ -28,10 +30,6 @@ services:
       - "9001:9001"
     volumes:
       - miniodata:/data
-    healthcheck:
-      test: ["CMD-SHELL", "mc ready local || exit 1"]
-      interval: 3s
-      retries: 15
 
 volumes:
   pgdata:

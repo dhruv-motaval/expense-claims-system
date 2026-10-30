@@ -130,7 +130,7 @@ read (post-payment) ──► paid-cache hit? serve (ticket) : cold fetch (CACHE
 - Served-from provenance (`hot` / `paid-cache` / `cold`) is visible in the file-access tickets.
 - MinIO config: `MINIO_ENDPOINT`, `MINIO_ROOT_USER/PASSWORD`, `MINIO_BUCKET_NAME`;
   cold: `COLD_S3_BUCKET_NAME`, `S3_STORAGE_CLASS` (default `STANDARD_IA`), `PAID_CACHE_DAYS`.
-  `docker compose up -d` starts the MinIO hot tier (db + minio).
+  `docker compose up -d` starts the MinIO hot tier (PostgreSQL + MinIO). The compose file uses the compatible Chainguard MinIO image because the upstream `minio/minio` Docker Hub image is no longer published.
 
 ### Receipt in-memory cache
 
