@@ -1,5 +1,6 @@
 """Gate tests — Phase ④: tiered storage (promote idempotent + verify, routing,
-paid-cache fallback, and payment-never-depends-on-promotion)."""
+paid-cache fallback, expiry reconciliation, and payment-never-depends-on-promotion)."""
+from datetime import date, datetime, timezone
 from unittest.mock import MagicMock
 
 import pytest
@@ -164,3 +165,62 @@ def test_lifecycle_rule_uses_prefix_and_days(c):
     assert rule["Filter"]["Prefix"].startswith("paid-cache/")
     assert rule["Expiration"]["Days"] == 7
     assert rule["Status"] == "Enabled"
+
+
+def test_expired_paid_cache_is_reconciled_and_ticketed(c, monkeypatch):
+    """A lifecycle-deleted cache copy clears the stale pointer exactly once."""
+    from sqlalchemy import select
+
+    from app import services
+    from app.db import SessionLocal
+    from app.models import AuditEvent, Claim, Receipt, Status, User
+
+    db = SessionLocal()
+    owner = db.scalar(select(User).where(User.email == "riya@example.com"))
+    receipt = Receipt(
+        user_id=owner.id,
+        image_path="receipts/expired.jpg",
+        s3_image_key="receipts/expired.jpg",
+        original_filename="expired.jpg",
+        storage_tier="COLD",
+        paid_cache_key="paid-cache/999/expired.jpg",
+    )
+    claim = Claim(
+        claim_number="CLM-EXPIRE-1",
+        user_id=owner.id,
+        merchant="ExpiredCacheTest",
+        transaction_date=date.today(),
+        category="OTHER",
+        amount=10,
+        currency="INR",
+        status=Status.PAID.value,
+        receipt=receipt,
+        paid_at=datetime.now(timezone.utc),
+    )
+    db.add(claim)
+    db.commit()
+    db.refresh(receipt)
+
+    class ColdFallback:
+        cold = object()
+
+        def get_content(self, key, tier, paid_cache_key):
+            assert tier == "COLD"
+            assert paid_cache_key == "paid-cache/999/expired.jpg"
+            return b"archived", "cold"
+
+    monkeypatch.setattr(services, "get_tiered_storage", lambda: ColdFallback())
+    try:
+        content, served_from = services.get_receipt_content(db, owner, receipt)
+        assert content == b"archived"
+        assert served_from == "cold"
+        assert receipt.paid_cache_key is None
+        actions = db.scalars(select(AuditEvent.action).where(AuditEvent.claim_id == claim.id)).all()
+        assert "CACHE_EXPIRED" in actions
+        assert "COLD_TIER_ACCESSED" in actions
+    finally:
+        db.query(AuditEvent).filter(AuditEvent.claim_id == claim.id).delete()
+        db.delete(claim)
+        db.delete(receipt)
+        db.commit()
+        db.close()

@@ -54,7 +54,7 @@
 | 4 | MinIO lifecycle rule (paid-cache/, 7d) applied at promotion; honest False when not object-store | ✅ |
 | 5 | docker-compose MinIO service + .env.example with all new knobs | ✅ |
 | 6 | receipt_cache.py TTL(1h)+LRU(64MB) wired into get_receipt_content (keyed on receipt id + checksum); per-request auth still enforced before lookup; delete-invalidation API present | ✅ (invalidation wired via ReceiptCache.invalidate_receipt; receipts app never moves raw files, so expiry is by checksum key) |
-| 7 | SERVED_FROM_COLD / CACHE_EXPIRED tickets | ⚠️ COLD_TIER_ACCESSED implemented (equivalent of SERVED_FROM_COLD); CACHE_EXPIRED sweep path exists as TieredStorage.sweep_expired_paid_cache but no scheduled runner — lifecycle rule is the primary expiry |
+| 7 | SERVED_FROM_COLD / CACHE_EXPIRED tickets | ✅ Cold fallback emits COLD_TIER_ACCESSED + CACHE_EXPIRED and clears the stale paid-cache pointer; lifecycle rule remains primary expiry (no background worker by design) |
 
 ## Phase ⑤ — Docs/README sync
 | # | Item | Status |
@@ -70,6 +70,6 @@
 | tests/test_sendback.py (4 tests) | send-back loop, guards, inert manager + finance return loop, spend math | ✅ |
 | tests/test_payment_tiers.py (6 tests) | tier A checksum block, tier B receipt-no block despite rewording, tier C justification gate, 5-legit-daily-cab regression, tier-D advisory-only, CAS double-pay race | ✅ |
 | tests/test_receipt_cache.py (5 tests) | TTL, LRU, auth semantics, delete-invalidation | ✅ |
-| tests/test_storage_tiers.py (6 tests) | promote/verify/idempotent, tier routing + cache fallback, lifecycle rule install | ✅ |
+| tests/test_storage_tiers.py (7 tests) | promote/verify/idempotent, tier routing + cache fallback, expiry reconciliation/tickets, lifecycle rule install | ✅ |
 
-**Current suite: 71 passed (43 baseline + 28 new).**
+**Current suite: 72 passed (43 baseline + 29 new).**

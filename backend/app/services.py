@@ -178,16 +178,32 @@ def get_receipt_content(db: Session, user: User, receipt: Receipt) -> tuple[byte
         if cached is not None:
             return cached, "memory"
     tiered = get_tiered_storage()
+    paid_cache_key = receipt.paid_cache_key
+    tier = getattr(receipt, "storage_tier", "HOT") or "HOT"
     try:
         content, served_from = tiered.get_content(
-            key, tier=getattr(receipt, "storage_tier", "HOT") or "HOT",
-            paid_cache_key=receipt.paid_cache_key)
+            key, tier=tier, paid_cache_key=paid_cache_key)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="No receipt image.")
+
+    claims = list(db.scalars(select(Claim).where(Claim.receipt_id == receipt.id)))
+    if tier == "COLD" and paid_cache_key and served_from == "cold":
+        # A missing paid-cache object is an observable lifecycle event. Reconcile
+        # the pointer so later reads do not repeatedly probe an expired key, then
+        # retain the permanent archive as the authoritative source.
+        receipt.paid_cache_key = None
+        for c in claims:
+            audit(db, c, user, "CACHE_EXPIRED", {
+                "receipt_id": receipt.id,
+                "expired_cache_key": paid_cache_key,
+                "served_from": served_from,
+            })
+        db.commit()
+
     if served_from == "cold":
-        # visibility: serving straight from the archive is worth a ticket so the
-        # trail shows when the paid-cache copy is gone/expired
-        for c in db.scalars(select(Claim).where(Claim.receipt_id == receipt.id)):
+        # Visibility: serving straight from the archive is worth a ticket so the
+        # trail shows when the paid-cache copy is gone/expired.
+        for c in claims:
             audit(db, c, user, "COLD_TIER_ACCESSED", {
                 "receipt_id": receipt.id, "served_from": served_from,
                 "hint": "paid-cache expired or missing"})

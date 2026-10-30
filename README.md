@@ -94,7 +94,7 @@ Every event is a JSON envelope in `audit_events.metadata`:
 
 Ticket types: `CLAIM_CREATED/UPDATED/SUBMITTED/APPROVED/REJECTED/PAID/SENT_BACK`,
 `CLAIM_RETURNED_TO_MANAGER`, `CLAIM_EDIT_BLOCKED` (frozen-status edit attempts),
-`RECEIPT_FILE_ACCESSED` / `COLD_TIER_ACCESSED` (every receipt view, authorized server-side),
+`RECEIPT_FILE_ACCESSED` / `COLD_TIER_ACCESSED` / `CACHE_EXPIRED` (every receipt view, authorized server-side),
 `DUPLICATE_WARNING`, `PAYMENT_BLOCKED`, `DUPLICATE_DISMISSED` (tier C, with justification),
 `RECEIPT_ARCHIVED`, `ARCHIVAL_FAILED`. Feedback lives in the ticket JSON — the latest
 `CLAIM_SENT_BACK` / `CLAIM_RETURNED_TO_MANAGER` ticket *is* the current feedback.
@@ -122,7 +122,7 @@ upload ──► HOT tier (local disk, or MinIO hot bucket)          ← active 
 payment ──► promote (checksum-verified, idempotent, non-blocking)
               ├─► COLD: S3 STANDARD_IA  receipts/<id>/original.<ext>   ← archive of record
               └─► paid-cache: MinIO paid-cache/<id>/… , lifecycle-expired after 7 days
-read (post-payment) ──► paid-cache hit? serve (ticket) : cold fetch (COLD_TIER_ACCESSED ticket)
+read (post-payment) ──► paid-cache hit? serve (ticket) : cold fetch (CACHE_EXPIRED + COLD_TIER_ACCESSED; clear stale cache pointer)
 ```
 
 - **Payment never depends on promotion.** Promotion runs *after* the pay transaction commits;
