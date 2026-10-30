@@ -97,12 +97,23 @@ export default function NewClaimPage() {
 
   return (
     <Shell>
-      <h1 className="text-xl font-bold mb-4">New Claim</h1>
+      <div className="mb-6">
+        <p className="text-xs font-bold uppercase tracking-widest text-blue-600">Expense submission</p>
+        <h1 className="mt-1 text-2xl font-bold tracking-tight text-slate-900">Create a new claim</h1>
+        <p className="mt-1 text-sm text-slate-500">Start with a receipt. You can review and correct the extracted details before saving.</p>
+      </div>
 
       {!form && (
         <div className="space-y-4 max-w-xl">
-          <div className="bg-white rounded-lg shadow p-4 space-y-3">
-            <label htmlFor="receipt-text" className="block text-sm font-medium">Paste receipt text</label>
+          <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm space-y-3">
+            <div className="flex items-start gap-3">
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-sm font-bold text-slate-700">1</span>
+              <div>
+                <h2 className="font-semibold text-slate-900">Paste receipt text</h2>
+                <p className="mt-0.5 text-sm text-slate-500">Or enter the receipt text manually if you don’t have a file.</p>
+              </div>
+            </div>
+            <label htmlFor="receipt-text" className="sr-only">Paste receipt text</label>
             <textarea
               id="receipt-text" rows={5} value={text} onChange={(e) => setText(e.target.value)}
               placeholder={"UBER\n12 Aug 2026\nTrip to Airport\n₹320"}
@@ -115,9 +126,16 @@ export default function NewClaimPage() {
               {busy === "extract" ? "Extracting..." : "Extract Claim"}
             </button>
           </div>
-          <div className="bg-white rounded-lg shadow p-4 space-y-3">
-            <label htmlFor="receipt-file" className="block text-sm font-medium">Or upload receipt file (pdf/jpg/png/webp, max 10 MB)</label>
+          <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm space-y-4">
+            <div className="flex items-start gap-3">
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-blue-100 text-sm font-bold text-blue-700">2</span>
+              <div>
+                <h2 className="font-semibold text-slate-900">Upload a receipt</h2>
+                <p className="mt-0.5 text-sm text-slate-500">Upload a PDF or image and we’ll fill in the claim details for you.</p>
+              </div>
+            </div>
             <input
+              ref={fileInputRef}
               id="receipt-file" type="file" accept="application/pdf,image/jpeg,image/png,image/webp,.pdf,.jpg,.jpeg,.png,.webp"
               onChange={(e) => {
                 const f = e.target.files?.[0] || null;
@@ -131,39 +149,49 @@ export default function NewClaimPage() {
                 }
                 setFile(f);
               }}
-              className="block text-sm"
+              className="sr-only"
             />
+            {!file && (
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="group w-full rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 px-4 py-7 text-center transition hover:border-blue-400 hover:bg-blue-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <span className="mx-auto flex h-11 w-11 items-center justify-center rounded-full bg-white text-2xl shadow-sm">↑</span>
+                <span className="mt-3 block text-sm font-semibold text-slate-800">Choose receipt file</span>
+                <span className="mt-1 block text-xs text-slate-500">PDF, JPG, PNG or WebP · maximum 10 MB</span>
+              </button>
+            )}
             {file && (
-              <div className="flex items-center gap-3 border rounded p-2 bg-gray-50">
-                {preview && (
+              <div className="flex items-center gap-3 rounded-lg border border-blue-200 bg-blue-50 p-3">
+                {preview && !/\.pdf$/i.test(file.name) && (
                   // eslint-disable-next-line @next/next/no-img-element
-                  <img src={preview} alt="Receipt preview" className="h-14 w-14 object-cover rounded border" />
+                  <img src={preview} alt="Receipt preview" className="h-14 w-14 object-cover rounded border border-white" />
                 )}
-                <div className="flex-1 min-w-0 text-sm">
-                  <p className="truncate font-medium">{file.name}</p>
-                  <p className="text-xs text-gray-500">
-                    {file.type === "application/pdf" || /\.pdf$/i.test(file.name) ? "PDF document · " : ""}
-                    {(file.size / 1024).toFixed(0)} KB
-                  </p>
+                {!preview || /\.pdf$/i.test(file.name) ? <span className="flex h-14 w-14 items-center justify-center rounded border bg-white text-xs font-bold text-red-600">PDF</span> : null}
+                <div className="min-w-0 flex-1 text-sm">
+                  <p className="truncate font-semibold text-slate-800">{file.name}</p>
+                  <p className="text-xs text-slate-500">{(file.size / 1024).toFixed(0)} KB · Ready to process</p>
                 </div>
                 <button
+                  type="button"
                   onClick={() => { setFile(null); setPreview(""); if (fileInputRef.current) fileInputRef.current.value = ""; }}
                   disabled={busy === "extract"}
-                  aria-label="Remove selected file"
-                  className="text-red-600 hover:text-red-700 text-sm font-medium px-2 py-1 rounded hover:bg-red-50 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-red-400"
+                  className="rounded-lg px-2 py-1 text-sm font-medium text-red-600 hover:bg-red-100 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-red-400"
                 >
                   Remove
                 </button>
               </div>
             )}
             <button
+              type="button"
               onClick={uploadImage} disabled={busy === "extract" || !file}
-              className="bg-blue-600 text-white rounded px-4 py-2 text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+              className="w-full rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40 focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
               {busy === "extract"
                 ? (file && (file.type === "application/pdf" || /\.pdf$/i.test(file.name))
-                  ? "Processing PDF (extract text, render pages)..." : "Uploading & extracting...")
-                : "Upload & Extract"}
+                  ? "Processing PDF (extracting text)..." : "Uploading & extracting...")
+                : "Upload & Extract Receipt"}
             </button>
           </div>
           <ErrorBox message={error} />
