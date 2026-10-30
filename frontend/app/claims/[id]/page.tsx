@@ -161,11 +161,11 @@ export default function ClaimDetailPage() {
         // endpoint (browser-native PDF viewer); images via the same endpoint.
         // Legacy receipts with persisted page images fall back to page previews.
         const rec = c.receipt;
-        if (!rec || (!rec.s3_image_key && !rec.image_path)) return;
+        if (!rec || (!rec.s3_image_key && !rec.image_path) || !rec.id) return;
         const token = getToken() || "";
         if (rec.has_pages) {
           try {
-            const d = await api(`/receipts/pages/${id}`);
+            const d = await api(`/receipts/pages/${rec.id}`);
             const urls: string[] = [];
             for (const p of d.pages || []) {
               const isPresigned = p.url.startsWith("http");
@@ -179,7 +179,7 @@ export default function ClaimDetailPage() {
             if (urls.length) { setPageUrls(urls); return; }
           } catch { /* fall through to original-file preview */ }
         }
-        const res = await fetch(`/api/receipts/image/${id}`, { headers: { Authorization: `Bearer ${token}` } });
+        const res = await fetch(`/api/receipts/image/${rec.id}`, { headers: { Authorization: `Bearer ${token}` } });
         if (res.ok) {
           const blob = await res.blob();
           const url = URL.createObjectURL(blob);

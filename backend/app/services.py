@@ -953,6 +953,7 @@ def claim_detail(db: Session, user: User, claim: Claim) -> dict:
     d["receipt"] = None
     if claim.receipt:
         d["receipt"] = {
+            "id": claim.receipt.id,
             "source_type": claim.receipt.source_type,
             "image_path": claim.receipt.image_path,
             "s3_image_key": claim.receipt.s3_image_key,
