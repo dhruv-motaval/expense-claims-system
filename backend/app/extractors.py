@@ -163,6 +163,8 @@ async def extract_from_image(content: bytes, content_type: str) -> ExtractedRece
             raise ExtractionError("AI extraction is not authorized. Check that AI_API_KEY is valid and enabled for Gemini.")
         if status == 429:
             raise ExtractionError("AI extraction is temporarily rate-limited. Try again later or enter the claim manually.")
+        if status == 404:
+            raise ExtractionError("AI model was not found. Check AI_MODEL in backend/.env and enter the claim manually if needed.")
         raise ExtractionError(f"AI extraction service returned HTTP {status}. Enter the claim manually.")
     except (httpx.TimeoutException, httpx.RequestError):
         raise ExtractionError("AI extraction service could not be reached. Check the backend connection or enter the claim manually.")
