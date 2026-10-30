@@ -138,7 +138,7 @@ async def extract_from_image(content: bytes, content_type: str) -> ExtractedRece
         async with httpx.AsyncClient(timeout=120) as client:
             r = await client.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/"
-                f"{os.getenv('AI_MODEL', 'gemini-2.0-flash')}:generateContent",
+                f"{os.getenv('AI_MODEL', 'gemini-3.5-flash-lite')}:generateContent",
                 # key travels in the header so it never lands in proxies/access logs
                 headers={"x-goog-api-key": key},
                 json={
