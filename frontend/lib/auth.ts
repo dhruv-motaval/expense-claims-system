@@ -43,6 +43,11 @@ export function useMe() {
 
 export async function api(path: string, options: RequestInit = {}) {
   const token = getToken();
+  // Plain-object bodies are encoded as JSON automatically — callers should not
+  // have to remember to stringify (FormData is left untouched for uploads).
+  if (options.body && typeof options.body === "object" && !(options.body instanceof FormData)) {
+    options.body = JSON.stringify(options.body);
+  }
   const res = await fetch(`/api${path}`, {
     ...options,
     headers: {

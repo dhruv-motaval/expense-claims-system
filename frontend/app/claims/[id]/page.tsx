@@ -409,12 +409,12 @@ export default function ClaimDetailPage() {
             </button>
           </>
         )}
-        {isFinance && claim.status === "SUBMITTED" && (
+        {isFinance && claim.status === "APPROVED" && (
           <>
             <button onClick={() => setReturning(!returning)} disabled={!!busy}
-              className="bg-amber-600 text-white rounded px-4 py-2 text-sm font-medium hover:bg-amber-700 disabled:opacity-50"
+              className="border border-amber-500 text-amber-700 rounded px-4 py-2 text-sm font-medium hover:bg-amber-50 disabled:opacity-50"
               title="Send this approved claim back to its manager with your feedback">
-              Return to manager
+              {busy === "return-to-manager" ? "Returning..." : "Return to manager"}
             </button>
           </>
         )}

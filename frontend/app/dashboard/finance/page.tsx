@@ -14,11 +14,29 @@ export default function FinanceDashboard() {
   const [busy, setBusy] = useState<number | null>(null);
   const [justFor, setJustFor] = useState<number | null>(null);      // claim id in the tier-C modal
   const [justification, setJustification] = useState("");
+  const [returnFor, setReturnFor] = useState<number | null>(null);  // claim id in return-to-manager modal
+  const [returnReason, setReturnReason] = useState("");
 
   function load() {
     api("/dashboard/finance").then(setData).catch((e) => setError(e.message));
   }
   useEffect(load, []);
+
+  async function returnToManager(id: number) {
+    setBusy(id);
+    setActionError("");
+    try {
+      await api(`/claims/${id}/return-to-manager`, { method: "POST", body: JSON.stringify({ reason: returnReason }) });
+      setReturnFor(null);
+      setReturnReason("");
+      load();
+    } catch (e: any) {
+      setActionError(e.message);
+      if (/changed by another action/.test(e.message)) { setReturnFor(null); load(); }
+    } finally {
+      setBusy(null);
+    }
+  }
 
   async function pay(id: number, just?: string) {
     setBusy(id);
@@ -121,19 +139,53 @@ export default function FinanceDashboard() {
                     <td className="px-3 py-2">{fmtDate(c.transaction_date)}</td>
                     <td className="px-3 py-2 text-right font-medium">{inr(c.amount)}</td>
                     <td className="px-3 py-2 text-right">
-                      <button
-                        onClick={() => (c.duplicate_tier === "C" ? setJustFor(c.id) : pay(c.id))}
-                        disabled={busy === c.id}
-                        className={`text-white rounded px-3 py-1 text-xs font-medium disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-violet-500 ${c.duplicate_tier ? "bg-amber-600 hover:bg-amber-700" : "bg-violet-600 hover:bg-violet-700"}`}
-                      >
-                        {busy === c.id ? "Paying..." : c.duplicate_tier === "C" ? "Pay anyway (justify)…" : "Mark as Paid"}
-                      </button>
+                      <div className="flex items-center justify-end gap-2">
+                        <button
+                          onClick={() => setReturnFor(c.id)}
+                          disabled={busy === c.id}
+                          className="text-amber-700 border border-amber-500 rounded px-3 py-1 text-xs font-medium hover:bg-amber-50 disabled:opacity-50"
+                          title="Return this approved claim to its manager with your feedback"
+                        >
+                          Return to manager
+                        </button>
+                        <button
+                          onClick={() => (c.duplicate_tier === "C" ? setJustFor(c.id) : pay(c.id))}
+                          disabled={busy === c.id}
+                          className={`text-white rounded px-3 py-1 text-xs font-medium disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-violet-500 ${c.duplicate_tier ? "bg-amber-600 hover:bg-amber-700" : "bg-violet-600 hover:bg-violet-700"}`}
+                        >
+                          {busy === c.id ? "Working..." : c.duplicate_tier === "C" ? "Pay anyway (justify)…" : "Mark as Paid"}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                   );
                 })}
               </tbody>
             </table>
+          )}
+
+          {returnFor !== null && (
+            <div className="bg-amber-50 border border-amber-300 rounded-lg shadow p-4 my-4 max-w-md space-y-2">
+              <p className="text-sm font-semibold">Return claim to its manager</p>
+              <p className="text-xs text-gray-600">
+                The claim goes back to the manager's queue as "Submitted" with your feedback.
+                Finance never contacts staff directly — the manager relays it.
+              </p>
+              <input
+                value={returnReason}
+                onChange={(e) => setReturnReason(e.target.value)}
+                placeholder="e.g. Category mismatch: receipt shows accommodation"
+                className="w-full border rounded px-3 py-2 text-sm" />
+              <div className="flex gap-2">
+                <button onClick={() => returnToManager(returnFor)}
+                  disabled={busy === returnFor || !returnReason.trim()}
+                  className="bg-amber-600 text-white rounded px-4 py-1.5 text-sm font-medium disabled:opacity-50">
+                  {busy === returnFor ? "Returning..." : "Confirm return to manager"}
+                </button>
+                <button onClick={() => { setReturnFor(null); setReturnReason(""); }}
+                  className="border rounded px-4 py-1.5 text-sm font-medium hover:bg-gray-100">Cancel</button>
+              </div>
+            </div>
           )}
 
           {justFor !== null && (
