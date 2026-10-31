@@ -1,278 +1,248 @@
 # Expense Claims System
 
-An internal expense-claims application: staff file claims from pasted receipt text or receipt
-images, managers approve their team's claims, finance pays and tracks monthly spend against
-per-employee limits — with tamper-evident JSON audit tickets, a two-gate send-back workflow,
-tiered duplicate-payment prevention and tiered receipt storage (hot MinIO → paid-cache → cold S3).
+A three-role expense-claim workflow system with **AI-powered receipt extraction** and **tiered receipt storage**.
+Staff submit claims with photo/PDF receipts, managers review, and Finance pays — with duplicate-proofing,
+frozen revision windows and a full audit trail on every step.
 
-## Features
+Built with **FastAPI + SQLAlchemy + PostgreSQL** on the back end and **Next.js 15 + Tailwind** on the front end.
 
-- Demo login with three roles: Staff, Manager, Finance
-- Claim creation with receipt **text extraction** (deterministic parser, always available)
-  and **image extraction** (Gemini vision API, optional; API key sent via `x-goog-api-key` header)
-- **Duplicate-proof anchors**: every claim carries Receipt No. + transaction Time (minute-truncated),
-  normalized on write; duplicate checks match on identity, fuzzy resemblance only advises
-- Explicit claim state machine (below) including a **manager send-back** and a
-  **finance return-to-manager** gate; paid (and everything after approval) is frozen
-- **JSON audit tickets**: every event (create/update/transition/edit-block/reference/file
-  access/payment block/duplicate dismissal) is one JSON envelope written in the same DB
-  transaction as the change, visible to everyone with claim access, forever
-- **Tiered duplicate-payment prevention**: tier A (same file bytes) and tier B (same receipt no.)
-  hard-block; tier C (same merchant+date+amount) demands a typed justification; tier D never blocks
-- **Tiered storage**: active receipts live on the hot tier (local disk or MinIO); at payment the
-  canonical file is promoted (checksum-verified, idempotent, non-blocking) to S3 `STANDARD_IA`,
-  with a 7-day `paid-cache/` copy on MinIO that a lifecycle rule expires
-- **In-memory receipt cache**: TTL 1h + LRU 64MB for hot serving; authorization is never cached
-- Monthly limits with `NORMAL / NEAR LIMIT / OVER LIMIT` status per employee
-- Full dashboards for staff, manager (team queue + spend) and finance (payment queue with
-  duplicate tier chips, spend analytics)
+---
 
-## Architecture
+## Table of contents
+
+- [Workflow](#workflow)
+- [Key features](#key-features)
+- [Receipt storage tiers](#receipt-storage-tiers)
+- [Duplicate-proofing](#duplicate-proofing)
+- [Quick start](#quick-start)
+- [Demo accounts](#demo-accounts)
+- [Configuration](#configuration)
+- [API overview](#api-overview)
+- [Testing](#testing)
+- [Project structure](#project-structure)
+- [Security notes](#security-notes)
+
+---
+
+## Workflow
 
 ```
-Browser (Next.js + Tailwind)  →  /api/* proxied via next.config.mjs rewrites
-        │
-        ▼
-FastAPI backend  ──►  SQLAlchemy  ──►  PostgreSQL (docker compose / or any SQL DB)
-   │
-   ├── extractors: deterministic text parser + optional Gemini vision extraction
-   ├── duplicates: identity tiers A/B/C + fuzzy advisory (D)
-   ├── storage:   TieredStorage(hot=LocalStorage|MinIO, cold=S3) + ReceiptCache
-   └── audit:     one JSON ticket per event, same transaction as the change
+STAFF                     MANAGER                      FINANCE
+─────                     ───────                      ───────
+DRAFT ── submit ─▶ SUBMITTED ── approve ─▶ APPROVED ── pay ─▶ PAID (final)
+                      │                       │
+                      │ send-back (reason +   │ return-to-manager (reason)
+                      ▼ flagged fields)       ▼
+                   SENT_BACK              SUBMITTED (back in manager's queue)
+                      │
+                      │ staff edits & resubmits
+                      ▼
+                   SUBMITTED
 ```
 
-Business rules live entirely in the backend (`app/services.py`, `app/duplicates.py`):
-authorization, the state machine, duplicate tiers, monthly limits, storage routing.
-The AI layer only turns unstructured receipt input into editable fields — it never decides
-permissions, transitions, duplicates or payments.
+Rules enforced **server-side** (not just in the UI):
 
-## Claim state machine
+- Staff can only edit their own claims while `DRAFT` / `SENT_BACK`; every other state is frozen (attempts are audited).
+- Finance **never contacts staff directly** — an approved claim can only be pulled back to its manager.
+- Users cannot approve or pay their own claims.
+- Payments to a possible duplicate require a typed justification (stored on the audit trail).
 
-```
-DRAFT ──submit──► SUBMITTED ──manager──► APPROVED ──finance──► PAID (terminal)
-  ▲                  │        │              │
-  └── REJECTED ✓     │        └─ reject      └─ return-to-manager: APPROVED → SUBMITTED
-  (REJECTED→DRAFT)   │           (manager only)
-                     │
-                     └─ send-back (manager only): SUBMITTED → SENT_BACK
-SENT_BACK → DRAFT (owner, keep private) | SENT_BACK → SUBMITTED (owner, resubmit)
-```
+## Key features
 
-Capability matrix (server-enforced; the UI mirrors it):
+- **AI receipt extraction** — upload an image/PDF and the receipt text is parsed into structured fields
+  (merchant, receipt no, date, time, category, amount) via the Google **Gemini** API
+  (`gemini-3.5-flash-lite` by default). Graceful error mapping for missing/invalid API key, quota
+  exhaustion and restricted models.
+- **Categorized work queues**
+  - Manager dashboard: **↩ Returned by finance — your re-review** (with the finance note shown inline)
+    and **🆕 New requests — waiting for approval** as separate tables.
+  - Finance dashboard: **Payment queue** with per-row *Mark as Paid* and *Return to manager*.
+- **Lazy receipt viewer** — ticket pages load all details in **one** call; the receipt **file bytes are only
+  fetched on demand**. "Show original receipt" opens a fullscreen viewer with
+  zoom (buttons / wheel / keys, 1×–10×), drag-to-pan, page navigation for multi-page PDFs,
+  and download with the original filename. Open/close/reopen as many times as you like.
+- **Ticket details where they're needed** — every claim row carries its receipt's location
+  (`receipt_file`, `receipt_id`), filename, size and storage tier; manager snapshot summaries
+  (spend vs limit, projected spend, near-limit warnings) update across dashboards.
+- **Audit trail** — every action writes a ticket: submissions, approvals, rejections, send-backs,
+  edit attempts on frozen claims, payment blocks, duplicate dismissals and receipt file access.
+- **Monthly limits** — per-user limits with live spend bars and `NEAR_LIMIT` / `OVER_LIMIT` badges.
 
-| Phase | Staff owner | Manager | Finance |
-|---|---|---|---|
-| DRAFT | edit, submit | — | — |
-| SUBMITTED | — (frozen) | approve / reject / **send back** | — |
-| SENT_BACK ("Returned for revision") | edit, resubmit, back-to-draft | — | — |
-| APPROVED | — (frozen) | — (inert until Finance acts) | pay / **return to manager** |
-| PAID | view only | view only | view only |
+## Receipt storage tiers
 
-Two integrity gates worth noting:
+| Tier | Where | When |
+|------|-------|------|
+| **HOT** (active) | local `storage/` dir or MinIO | Claims in review; chips show 🧾 **hot** |
+| **COLD** (archived) | S3 with `STANDARD_IA` | After payment; lifecycle-managed |
 
-- **Finance never contacts staff directly.** After approval, feedback flows Finance → Manager
-  (`return-to-manager` tickets `CLAIM_RETURNED_TO_MANAGER` with `assigned_to`), and only the
-  Manager can push work back to staff (`send-back` → `SENT_BACK`).
-- **A manager is inert after approving.** Approve/reject/send-back on an APPROVED claim are all
-  refused — the claim is exactly what Finance will pay.
+The active file location always travels with the claim data (`receipt_file` on every claim payload),
+so dashboards, viewers and exports never need a second lookup. Paid receipts additionally get a
+time-limited copy in the MinIO `paid-cache/` bucket (git-ignored, runtime-only).
 
-## Audit tickets
+Local hot storage is integrity-protected: every file's SHA-256 is stored in the DB and verified when restored.
 
-Every event is a JSON envelope in `audit_events.metadata`:
+## Duplicate-proofing
 
-```json
-{
-  "actor": {"id": 4, "name": "Arjun Mehta", "role": "MANAGER"},
-  "transition": {"from": "SUBMITTED", "to": "SENT_BACK"},
-  "feedback": {"reason": "Amount exceeds receipt",
-               "flagged_fields": ["amount", "merchant"],
-               "comment": "Attach the correct receipt page"},
-  "at": "2026-10-30T03:33:05+00:00",
-  "claim_number": "CLM-1011"
-}
-```
+Four detection tiers run against **paid** claims:
 
-Ticket types: `CLAIM_CREATED/UPDATED/SUBMITTED/APPROVED/REJECTED/PAID/SENT_BACK`,
-`CLAIM_RETURNED_TO_MANAGER`, `CLAIM_EDIT_BLOCKED` (frozen-status edit attempts),
-`RECEIPT_FILE_ACCESSED` / `COLD_TIER_ACCESSED` / `CACHE_EXPIRED` (every receipt view, authorized server-side),
-`DUPLICATE_WARNING`, `PAYMENT_BLOCKED`, `DUPLICATE_DISMISSED` (tier C, with justification),
-`RECEIPT_ARCHIVED`, `ARCHIVAL_FAILED`. Feedback lives in the ticket JSON — the latest
-`CLAIM_SENT_BACK` / `CLAIM_RETURNED_TO_MANAGER` ticket *is* the current feedback.
+| Tier | Basis | Behaviour |
+|------|-------|-----------|
+| **A** | identical canonical file (SHA-256) | hard payment block |
+| **B** | same normalized receipt number | hard payment block |
+| **C** | same merchant + date + amount | payment blocked, pay requires a ≥20-char justification (compare anchors shown log-style) |
+| **D** | fingerprint similarity (reworded duplicates) | advisory warning chips everywhere + eligibility notes |
 
-## Duplicate-payment tiers
+Normalization rules (merchant naming, receipt numbers, times, dates) are applied **on write**, so the
+anchors themselves stay clean.
 
-All matching is strict equality after exactly one normalization step
-(receipt no upper-cased/un-punctuated/label-stripped; time minute-truncated, am/pm folded to
-24h — `14:22:05` ≡ `14:22`, `2:30 pm` ≡ `14:30`). A missing anchor is "absent", never a mismatch.
+## Quick start
 
-| Tier | Fires when… | Effect |
-|---|---|---|
-| **A** | the claim's canonical file bytes (SHA-256) match an already-paid receipt | hard block, `PAYMENT_BLOCKED` |
-| **B** | the normalized receipt number matches an already-paid receipt | hard block, `PAYMENT_BLOCKED` |
-| **C** | merchant + date + amount all match a paid claim (receipt nos not both-present-equal) | Finance must type a ≥20-char justification → `DUPLICATE_DISMISSED`, then pays |
-| **D** | weighted fuzzy similarity (merchant 35 / amount 30 / date 20 / description 15) ≥ 65 | advisory chip only — never blocks |
-
-The daily-cab regression is covered by a test: five legit same-merchant same-amount claims on
-five different days all pay freely.
-
-## Tiered storage
-
-```
-upload ──► HOT tier (local disk, or MinIO hot bucket)          ← active claims serve from here
-payment ──► promote (checksum-verified, idempotent, non-blocking)
-              ├─► COLD: S3 STANDARD_IA  receipts/<id>/original.<ext>   ← archive of record
-              └─► paid-cache: MinIO paid-cache/<id>/… , lifecycle-expired after 7 days
-read (post-payment) ──► paid-cache hit? serve (ticket) : cold fetch (CACHE_EXPIRED + COLD_TIER_ACCESSED; clear stale cache pointer)
-```
-
-- **Payment never depends on promotion.** Promotion runs *after* the pay transaction commits;
-  a failed promote writes `ARCHIVAL_FAILED` and the payment stands. Retrying promote is safe.
-- Served-from provenance (`hot` / `paid-cache` / `cold`) is visible in the file-access tickets.
-- MinIO config: `MINIO_ENDPOINT`, `MINIO_ROOT_USER/PASSWORD`, `MINIO_BUCKET_NAME`;
-  cold: `COLD_S3_BUCKET_NAME`, `S3_STORAGE_CLASS` (default `STANDARD_IA`), `PAID_CACHE_DAYS`.
-  `docker compose up -d` starts the MinIO hot tier (PostgreSQL + MinIO). The compose file uses the compatible Chainguard MinIO image because the upstream `minio/minio` Docker Hub image is no longer published.
-
-### Receipt in-memory cache
-
-Raw receipt bytes are cached in-process keyed on receipt id + checksum: TTL 1 hour, LRU-capped
-at 64 MB (`RECEIPT_CACHE_TTL_SECONDS` / `RECEIPT_CACHE_MAX_BYTES`). Authorization is checked on
-*every* request before the cache is consulted — the cache never grants access, and
-`ReceiptCache.invalidate_receipt` drops all derived keys for a receipt. Dashboards and claims
-data are never cached.
-
-## Setup
-
-Requirements: Docker (for Postgres + optional MinIO), Python 3.11+, Node 18+.
+### 1. Backend (FastAPI)
 
 ```bash
-git clone <repo> && cd expense-claims
-
-# 1. Database + MinIO hot tier
-docker compose up -d
-
-# 2. Backend
 cd backend
 python -m venv .venv
-.venv\Scripts\activate            # Windows   (bash/macOS: source .venv/bin/activate)
+.venv\Scripts\activate          # Windows  (Linux: source .venv/bin/activate)
 pip install -r requirements.txt
-copy .env.example .env            # adjust DATABASE_URL if needed
-alembic upgrade head
-python -m app.seed
 
-# 3. Frontend (new terminal)
-cd ../frontend
-npm install
-npm run dev
+# create backend/.env from the template
+cp .env.example .env            # then edit (see Configuration below)
+
+# start the API (creates tables and serves on http://localhost:8000)
+uvicorn app.main:app --reload
 ```
 
-Open http://localhost:3000 — API docs at http://localhost:8000/docs.
+The default `DATABASE_URL` expects PostgreSQL at `localhost:5432` (`expense_claims` schema).
 
-Without Docker, set `DATABASE_URL=sqlite:///./demo.db` in `backend/.env` and leave `MINIO_ENDPOINT`
-empty — the hot tier becomes the local disk (paid-cache unavailable, promotion copy-to-cold only);
-everything else works identically (that is what the automated tests use).
+### 2. Demo data
+
+```bash
+cd backend
+.venv\Scripts\python.exe -m app.seed
+```
+
+Seeds five demo users (password `password123` — demo only, no real auth in scope),
+monthly limits and a handful of claims.
+
+### 3. Frontend (Next.js)
+
+```bash
+cd frontend
+npm install
+npm run dev            # http://localhost:3000 (proxies /api → http://localhost:8000)
+```
+
+Production build:
+
+```bash
+npm run build && npm start
+```
 
 ## Demo accounts
 
-All demo accounts share the password `password123` (demo auth only — any non-empty password
-is accepted; real auth is out of scope).
+All demo accounts use the password `password123`.
 
-| Name         | Email               | Role    | Limit     |
-|--------------|---------------------|---------|-----------|
-| Riya Patel   | riya@example.com    | Staff   | ₹20,000   |
-| Neha Shah    | neha@example.com    | Staff   | ₹20,000   |
-| Vikram Joshi | vikram@example.com  | Staff   | ₹15,000   |
-| Arjun Mehta  | arjun@example.com   | Manager | ₹25,000   |
-| Priya Desai  | priya@example.com   | Finance | —         |
+| Name | Email | Role | Monthly limit |
+|------|-------|------|---------------|
+| Riya Patel | `riya@example.com` | STAFF | ₹20,000 |
+| Neha Shah | `neha@example.com` | STAFF (near limit) | ₹20,000 |
+| Vikram Joshi | `vikram@example.com` | STAFF | ₹15,000 |
+| Arjun Mehta | `arjun@example.com` | MANAGER | ₹25,000 |
+| Priya Desai | `priya@example.com` | FINANCE | ₹50,000 |
 
-Neha is seeded at ₹18,700 approved spend (near limit). Riya has a **paid** ₹320 Uber claim from
-12 Aug carrying receipt anchor `UB984213X`; Vikram holds a draft rewording of it ("Uber
-Technologies / 12/08/26 / Airport ride / INR 320.00") with the **same receipt no** for the
-tier-B demo.
+The login page has one-click buttons for each demo account.
 
-### Suggested demo script
+## Configuration
 
-1. **Neha** logs in: monthly limit, current spend, recent claims.
-2. Paste `UBER / 12 Aug 2026 14:22 / Trip to Airport / Rs 1,450 / Receipt No: UB984213X`,
-   Extract — receipt no and time auto-fill; correct a field, Submit.
-3. **Arjun** approves — then tries to edit/approve again: refused (frozen + inert).
-4. Send-back demo: Arjun **sends a claim back** with `flagged_fields=[amount]`; Neha sees the
-   orange "returned for revision" card, fixes the amount, resubmits (`resubmission_count: 2`).
-5. Return-to-manager demo: Priya returns an approved claim with feedback; the ticket shows
-   `assigned_to: Arjun Mehta`; Arjun re-reviews.
-6. Tier-B duplicate demo: Vikram's reworded Uber draft — if approved, Priya's payment is
-   **blocked (`PAYMENT_BLOCKED`, tier B)** with the anchor comparison in the ticket.
-7. Tier-C demo: pay a claim that matches merchant+date+amount — Finance is asked for a typed
-   justification; the justification and the anchor card land on the audit trail.
-8. Post-payment: open the paid claim's receipt file — every view is ticketed
-   (`RECEIPT_FILE_ACCESSED`), at every phase, for staff owner / manager / finance.
+Backend environment variables (`backend/.env`, see `.env.example`):
 
-## Business decisions & assumptions
+| Variable | Purpose | Example |
+|----------|---------|---------|
+| `AI_API_KEY` | Google Gemini API key for receipt extraction (**never commit**) | |
+| `AI_MODEL` | model to use | `gemini-3.5-flash-lite` |
+| `DATABASE_URL` | SQLAlchemy URL | `postgresql+psycopg://...` (SQLite also supported) |
+| `STORAGE_BACKEND` | `local` or `s3` | `local` |
+| `STORAGE_DIR` | local hot-storage root | `../storage` |
+| `MINIO_ENDPOINT` / `MINIO_*` | MinIO (hot S3-compatible storage) | `http://localhost:9000` |
+| `S3_*` | AWS S3 (cold archive) config + storage class | `STANDARD_IA` |
 
-- **Currency**: INR only; **monthly period**: calendar month of the claim's transaction date.
-- **Actual spend** = `APPROVED + PAID`; **projected** = `SUBMITTED` (shown separately). `SENT_BACK`
-  claims count as neither (the test suite pins this).
-- **Over-limit behavior**: claims are *not* blocked automatically; Finance sees a clear OVER LIMIT flag.
-- **Frozen statuses**: `SUBMITTED` / `APPROVED` / `PAID` refuse edits server-side
-  (`EDITABLE_FIELDS_BY_STATUS`); the attempt is ticketed (`CLAIM_EDIT_BLOCKED`).
-- **CAS transitions**: every status change is a compare-and-swap
-  (`UPDATE … WHERE status = <current>`); a concurrent approve/pay yields **409**, never a silent
-  double transition.
-- **Duplicate UX**: warn + audit at submission; only paid *identity* matches block payment.
-- **Payments**: simulated by Finance (no gateway, per spec).
-- **Rejected → draft is explicit** ("return to draft" action) so the audit trail shows the loop.
-- **Auth**: HMAC token in localStorage + in-memory server sessions; demo-only. Sessions reset on
-  backend restart. Password checking is intentionally skipped; authorization is not.
-- **Receipts without AI**: paste-text extraction is fully deterministic and always works.
-  Image upload requires `AI_API_KEY`; the UI directs the user to enter the claim manually otherwise.
+Frontend: `BACKEND_URL` (defaults to `http://localhost:8000`) rewrites `/api` in `next.config.js`.
 
-## AI usage
+## API overview
 
-- **What**: receipt OCR/interpretation. `app/extractors.py` calls Google's Gemini
-  `generateContent` API (free tier, vision-capable `gemini-2.0-flash` default) with strict JSON
-  prompt asking for merchant, date, **time**, amount, currency, **receipt_no**, description and
-  category. The key travels in the `x-goog-api-key` header, never in the URL.
-- **Where**: `backend/app/extractors.py`, wired in `backend/app/services.py`.
-- **Never used for**: permissions, approval, payment, status transitions, spend math, duplicate
-  enforcement — all deterministic backend code.
-- To enable: set `AI_API_KEY` (free key from aistudio.google.com/apikey).
+FastAPI docs are generated automatically: **http://localhost:8000/docs**
 
-## Tests
+```
+POST /api/auth/login,{logout},login/get-me
+GET  /api/claims                     # list (role-filtered)
+GET  /api/claims/{id}                # full ticket: fields, receipt pointer + OCR data,
+                                     # feedback, full audit, duplicate analysis
+GET  /api/claims/{id}/receipt-data   # lazy: extracted data + OCR text
+GET  /api/claims/{id}/audit          # lazy: full audit with payloads
+GET  /api/claims/{id}/duplicates     # lazy: duplicates + anchor comparison
+POST /api/claims / PATCH /api/claims/{id}
+POST /api/claims/{id}/submit|approve|reject|send-back|return-to-manager|return-to-draft|pay
+POST /api/receipts/extract           # text receipt → extract
+POST /api/receipts/upload            # image/PDF receipt → extract
+GET  /api/receipts/image/{id}        # authorized original file streaming (logged)
+GET  /api/receipts/pages/{id}        # authorized page list for PDFs
+GET  /api/dashboard/staff|manager|finance
+GET  /api/reports                    # month + category aggregation
+```
+
+All endpoints enforce role rules server-side; the UI merely mirrors them.
+
+## Testing
 
 ```bash
 cd backend
-DATABASE_URL=sqlite:///:memory: python -m pytest
+.venv\Scripts\python.exe -m pytest -q
 ```
 
-**71 tests** — the original 43 (business rules + workflows + PDF/IDOR regressions, all kept
-passing) plus 28 new gate tests:
+**72 tests** cover gate rules (edit windows, role logic, self-approval blocks), payment tiers A–C,
+send-back/return flows, integrity & hashing, PDF artifact handling and lifecycle happy paths.
+The suite never touches real storage — tests run against an isolated temp directory.
 
-- `test_integrity.py` — anchor normalization on write, claim-update diffs in tickets,
-  frozen statuses, typed reject, receipt file-access tickets, anchor extraction
-- `test_sendback.py` — the full send-back loop, guardrails, inert manager + finance
-  return-to-manager loop, spend math excludes `SENT_BACK`
-- `test_payment_tiers.py` — tier A/B/C/D behavior, the daily-cab regression, CAS double-pay race
-- `test_receipt_cache.py` — TTL, LRU, invalidation, auth semantics
-- `test_storage_tiers.py` — promote verify/idempotence, tier routing + paid-cache fallback,
-  lifecycle rule installation, payment-never-depends-on-promotion
+## Project structure
 
-All run on SQLite with local storage and mocked S3 — no AWS, no MinIO, no network.
+```
+expense-claims-system/
+├── backend/
+│   ├── app/
+│   │   ├── main.py            # FastAPI app, /api routers
+│   │   ├── api.py             # HTTP endpoints (transparent + thin responsibility)
+│   │   ├── services.py        # business rules & workflows
+│   │   ├── extractors.py      # Gemini call and error handling
+│   │   ├── ocr.py             # scanned-PDF → text fallback (Tesseract, optional)
+│   │   ├── pdf_processor.py   # PDF rendering to per-page images
+│   │   ├── storage.py         # HOT/COLD tiered storage (local / MinIO / S3)
+│   │   ├── duplicates.py      # malformed receipt-no handling, anchor comparison, tiers
+│   │   ├── receipt_cache.py   # paid-cache queue with TTL
+│   │   ├── models.py          # SQLAlchemy models (claims, receipts, users, audit)
+│   │   ├── seed.py            # demo data
+│   │   └── schemas.py         # request/response validation (pydantic)
+│   ├── tests/                 # 72 gated tests
+│   └── .env / .env.example
+├── frontend/
+│   ├── app/                   # Next.js App Router pages
+│   │   ├── claims/[id]        # ticket detail + lazy receipt viewer
+│   │   └── dashboard/         # staff / manager / finance queues
+│   ├── components/            # claim tables, receipt viewer, UI primitives
+│   └── lib/auth.ts            # token handling, fetch wrapper
+├── docs/                      # design & implementation status notes
+└── storage/                   # runtime HOT storage (git-ignored)
+```
 
-## PDF receipts
+## Security notes
 
-PDF, JPEG, PNG and WebP receipts are accepted by the same upload endpoint. PDFs are validated by
-signature, limited to 10 MB and `PDF_MAX_PAGES` pages, and processed with PyMuPDF: embedded text
-is extracted and the accurate `page_count` recorded; page *rendering* is opt-in
-(`render_pages`, used only by the legacy artifact flows). New uploads persist ONE private object
-per receipt (`receipts/<receipt-id>/original.pdf` under either storage backend) plus the
-structured `extracted_data` JSON in Postgres; extracted JSON (merchant, date, time, receipt_no,
-amount, currency, description, category, extraction_status, page_count) lives in
-`receipts.extracted_data`. Legacy receipts with persisted page images remain readable via
-`/api/receipts/pages`. PDF preview uses the authorized original-PDF endpoint in a sandboxed
-iframe; blob object URLs are revoked on reload/unmount.
+- **Never commit API keys or credentials.** `backend/.env` is git-ignored; only `.env.example` is tracked.
+- `storage/` is git-ignored — real receipts never enter version control.
+- Authentication in this repo is **demo-only** (single demo password); JWT/session hardening is out of scope here — production use would require real auth, HTTPS and Postgres-backed sessions before rollout.
+- Receipt files are served exclusively through authorized endpoints that check role/ownership and log each access (`RECEIPT_FILE_ACCESSED`).
+- Receipt file paths are validated against the storage root (no path traversal).
+- PDF previews render sandboxed (no script execution).
 
-Migrations run with `alembic upgrade head`. Recent migrations: `0df2dc126555` (receipt ownership +
-S3 keys), `45cc8add3d05` (s3_pages_keys), `b2f90471b17c` (file metadata + extracted_data),
-`a3f5c9d1e771` (claim/receipt receipt_no + trans_time anchors, receipts.storage_tier +
-paid_cache_key). The full implemented/not-implemented ledger lives in
-[docs/IMPLEMENTATION-STATUS.md](docs/IMPLEMENTATION-STATUS.md); the frozen architecture spec is
-[docs/FINAL-DESIGN.md](docs/FINAL-DESIGN.md).
+---
+
+*Built as a demo/QA project. Amounts, merchants and "receipts" flow through realistic but synthetic
+sample documents; seeded data marks itself as demo/test data.*
