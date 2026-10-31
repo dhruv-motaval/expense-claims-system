@@ -148,6 +148,24 @@ def get_claim(claim_id: int, db: Session = Depends(get_db), user: User = Depends
     return services.claim_detail(db, user, _get_claim(db, claim_id))
 
 
+@claim_router.get("/{claim_id}/receipt-data")
+def claim_receipt_data(claim_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """Lazy: extracted data + original OCR text (fetched only when the section is expanded)."""
+    return services.claim_receipt_data(db, user, _get_claim(db, claim_id))
+
+
+@claim_router.get("/{claim_id}/audit")
+def claim_audit_full(claim_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """Lazy: full audit trail with metadata payloads (fetched when History is expanded)."""
+    return services.claim_audit_full(db, user, _get_claim(db, claim_id))
+
+
+@claim_router.get("/{claim_id}/duplicates")
+def claim_duplicates(claim_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """Lazy: duplicate warnings + payment anchor comparison."""
+    return services.claim_duplicates(db, user, _get_claim(db, claim_id))
+
+
 @claim_router.patch("/{claim_id}")
 def patch_claim(claim_id: int, data: ClaimUpdate, db: Session = Depends(get_db), user: User = Depends(current_user)):
     claim = services.update_claim(db, user, _get_claim(db, claim_id), data)

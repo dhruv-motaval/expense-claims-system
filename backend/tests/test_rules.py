@@ -106,7 +106,8 @@ def test_duplicate_detection(seeded):
         "merchant": "Uber Technologies", "transaction_date": str(date.today()),
         "category": "TAXI", "amount": 320, "description": "Airport ride", "submit": True}).json()["id"]
     detail = seeded.get(f"/api/claims/{cid}", headers=headers).json()
-    assert any(m["level"] == "strong" for m in detail["duplicate_matches"])
+    dup = seeded.get(f"/api/claims/{cid}/duplicates", headers=headers).json()
+    assert any(m["level"] == "strong" for m in dup["matches"])
 
 
 # Test 8 - double payment blocked

@@ -11,7 +11,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from . import db as db_config
-from .duplicates import (content_hash, fingerprint, find_duplicates, identity_match,
+from .duplicates import (content_hash, duplicate_flags, fingerprint, find_duplicates, identity_match,
                          match_dict, normalize_merchant, normalize_receipt_no, normalize_time,
                          parse_date, categorize, parse_amount,
                          anchor_compare, TIER_A, TIER_B, TIER_C, TIER_D)
@@ -988,37 +988,75 @@ def claim_dict(c: Claim) -> dict:
 
 
 def claim_detail(db: Session, user: User, claim: Claim) -> dict:
+    """Lightweight core ticket: identity, status, receipt POINTER, feedback and
+    an audit summary. Every heavy payload (OCR text, extracted data, audit
+    metadata, duplicate analysis) loads on demand from its own endpoint, so
+    opening a ticket never drags big blobs along."""
     require_claim_view(user, claim)
     d = claim_dict(claim)
     d["receipt"] = None
     if claim.receipt:
+        rec = claim.receipt
         d["receipt"] = {
-            "id": claim.receipt.id,
-            "source_type": claim.receipt.source_type,
-            "image_path": claim.receipt.image_path,
-            "s3_image_key": claim.receipt.s3_image_key,
-            "original_text": claim.receipt.original_text,
-            "original_filename": claim.receipt.original_filename,
-            "content_type": claim.receipt.content_type,
-            "file_size": claim.receipt.file_size,
-            "checksum_sha256": claim.receipt.checksum_sha256,
-            "processing_status": claim.receipt.processing_status,
-            "extracted_data": claim.receipt.extracted_data,
-            "has_pages": bool(claim.receipt.s3_pages_keys),
-            "storage_tier": getattr(claim.receipt, "storage_tier", "HOT"),
+            "id": rec.id,
+            "source_type": rec.source_type,
+            "image_path": rec.image_path,
+            "s3_image_key": rec.s3_image_key,
+            "original_filename": rec.original_filename,
+            "content_type": rec.content_type,
+            "file_size": rec.file_size,
+            "checksum_sha256": rec.checksum_sha256,
+            "processing_status": rec.processing_status,
+            "has_pages": bool(rec.s3_pages_keys),
+            "storage_tier": getattr(rec, "storage_tier", "HOT"),
+            # NOTE: extracted_data and original_text intentionally excluded —
+            # they arrive via /claims/{id}/receipt-data when the user asks.
         }
     d["latest_feedback"] = get_ticket_feedback(
         db, claim, ("CLAIM_SENT_BACK", "CLAIM_RETURNED_TO_MANAGER"))
     d["duplicate_tier"] = None
-    tier, _, compared = identity_match(db, claim)
+    tier, _, _ = identity_match(db, claim)
     if tier:
         d["duplicate_tier"] = tier
+    # audit summary WITHOUT payloads: action + actor + time only. Full audit
+    # (with metadata / JSON payloads) loads via /claims/{id}/audit.
     d["audit"] = [{
+        "action": a.action,
+        "user_name": a.user.name if a.user else None,
+        "created_at": a.created_at.isoformat(),
+    } for a in claim.audits]
+    return d
+
+
+def claim_receipt_data(db: Session, user: User, claim: Claim) -> dict:
+    """Lazy section 1: extracted receipt data + original OCR text."""
+    require_claim_view(user, claim)
+    if not claim.receipt:
+        raise HTTPException(status_code=404, detail="No receipt on this claim.")
+    return {
+        "receipt_id": claim.receipt.id,
+        "extracted_data": claim.receipt.extracted_data or {},
+        "original_text": claim.receipt.original_text,
+    }
+
+
+def claim_audit_full(db: Session, user: User, claim: Claim) -> list[dict]:
+    """Lazy section 2: full audit trail including metadata payloads."""
+    require_claim_view(user, claim)
+    return [{
         "action": a.action, "meta": a.meta,
         "user_name": a.user.name if a.user else None,
         "created_at": a.created_at.isoformat(),
     } for a in claim.audits]
-    d["duplicate_matches"] = [match_dict(m) for m in find_duplicates(
-        db, {"merchant": claim.merchant, "date": claim.transaction_date,
-             "amount": float(claim.amount), "description": claim.description}, exclude_id=claim.id)]
-    return d
+
+
+def claim_duplicates(db: Session, user: User, claim: Claim) -> dict:
+    """Lazy section 3: duplicate warnings + payment anchor comparison."""
+    require_claim_view(user, claim)
+    tier, matched, compared = identity_match(db, claim)
+    return {
+        "tier": tier,
+        "matched_claim_number": matched.claim_number if matched else None,
+        "compared": compared or None,
+        "matches": duplicate_flags(db, claim, exclude_id=claim.id),
+    }

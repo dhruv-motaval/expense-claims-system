@@ -120,12 +120,6 @@ function activeFeedback(claim: any) {
   return superseded ? null : feedback;
 }
 
-/** Extract the anchor comparison captured in the latest duplicate-related ticket. */
-function latestCompared(audit: any[]): { compared: any; matched: string | null; action: string } | null {
-  const hit = [...(audit || [])].reverse().find(
-    (a) => typeof a.meta?.compared !== "undefined" && a.meta?.compared !== null);
-  return hit ? { compared: hit.meta.compared, matched: hit.meta?.matched?.claim ?? null, action: hit.action } : null;
-}
 
 export default function ClaimDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -146,6 +140,17 @@ export default function ClaimDetailPage() {
   // Lazy receipt viewer: nothing is downloaded until the user asks for it.
   // viewer = { mode, loading } → then src/srcs once the authorized blob is here.
   const [viewer, setViewer] = useState<null | { mode: "image" | "pdf" | "pages"; loading: boolean; src?: string; srcs?: string[] }>(null);
+  // Lazy ticket sections: heavy payloads load on demand, never with the core ticket.
+  const [receiptData, setReceiptData] = useState<null | { extracted_data: Record<string, any>; original_text: string | null }>(null);
+  const [loadingReceiptData, setLoadingReceiptData] = useState(false);
+  const [receiptDataOpen, setReceiptDataOpen] = useState(false);
+  const [auditFull, setAuditFull] = useState<any[] | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
+  const [loadingAudit, setLoadingAudit] = useState(false);
+  const [dupInfo, setDupInfo] = useState<null | { tier?: string | null; matched_claim_number?: string | null; compared?: Record<string, any> | null; matches: any[] }>(null);
+  const [showDups, setShowDups] = useState(false);
+  const [loadingDup, setLoadingDup] = useState(false);
+  const [dupAutoTried, setDupAutoTried] = useState(false);   // auto-fetch only once per ticket
   const objectUrlsRef = useRef<string[]>([]);          // blob URLs to revoke
 
   const revokeAll = () => {
@@ -161,6 +166,10 @@ export default function ClaimDetailPage() {
   const load = useCallback(() => {
     revokeAll();
     setPageUrls([]); setPreviewKind("");
+    // lazy section caches reset with the ticket
+    setReceiptData(null); setReceiptDataOpen(false);
+    setAuditFull(null); setShowHistory(false);
+    setDupInfo(null); setShowDups(false); setDupAutoTried(false);
     api(`/claims/${id}`).then((c: any) => {
       setClaim(c);
       // Receipts are NOT fetched here: images/PDFs load on demand via
@@ -174,6 +183,44 @@ export default function ClaimDetailPage() {
     }).catch((e) => setError(e.message));
   }, [id]);
   useEffect(load, [load]);
+
+  /** Lazy section 1: extracted data + original OCR text — only when opened. */
+  async function loadReceiptData() {
+    if (receiptData || loadingReceiptData || !claim?.receipt) return;
+    setLoadingReceiptData(true);
+    try {
+      setReceiptData(await api(`/claims/${id}/receipt-data`));
+      setReceiptDataOpen(true);
+    } catch { setReceiptDataOpen(true); } finally { setLoadingReceiptData(false); }
+  }
+
+  /** Lazy section 2: full audit trail with payloads — only when History is expanded. */
+  async function loadAudit() {
+    setShowHistory((h) => !h);
+    if (auditFull || loadingAudit) return;
+    setLoadingAudit(true);
+    try { setAuditFull(await api(`/claims/${id}/audit`)); } catch (e: any) { setError(e.message); } finally { setLoadingAudit(false); }
+  }
+
+  /** Lazy section 3: duplicate warnings + payment anchor comparison. */
+  async function loadDuplicates() {
+    if (dupInfo || loadingDup) return;
+    setLoadingDup(true);
+    try {
+      const d = await api(`/claims/${id}/duplicates`);
+      setDupInfo(d);
+      setShowDups(true);
+    } catch { setDupInfo({ matches: [] }); } finally { setLoadingDup(false); }
+  }
+
+  // Auto-load duplicate analysis only when the backend reports a payment
+  // tier; otherwise the section stays behind the manual "Check duplicates" button.
+  useEffect(() => {
+    if (claim?.duplicate_tier && !dupInfo && !dupAutoTried) {
+      setDupAutoTried(true);
+      loadDuplicates();
+    }
+  }, [claim?.id, claim?.duplicate_tier, dupInfo]);
 
   async function openViewer() {
     const c = claim;
@@ -266,8 +313,8 @@ export default function ClaimDetailPage() {
       )}
 
       <AnchorPanel
-        compared={latestCompared(claim.audit)?.compared ?? null}
-        matchedNumber={latestCompared(claim.audit)?.matched ?? null}
+        compared={dupInfo?.compared ?? null}
+        matchedNumber={dupInfo?.matched_claim_number ?? null}
       />
 
       <div className="bg-white rounded-lg shadow p-4 mb-4 grid grid-cols-2 gap-3 text-sm">
@@ -287,10 +334,35 @@ export default function ClaimDetailPage() {
             <p className="text-gray-500">Rejection reason</p><p>{claim.rejection_reason}</p>
           </div>
         )}
-        {claim.receipt?.original_text && (
+        {claim.receipt && (
           <div className="col-span-2">
-            <p className="text-gray-500 mb-1">Original receipt text</p>
-            <pre className="bg-gray-50 border rounded p-2 text-xs whitespace-pre-wrap">{claim.receipt.original_text}</pre>
+            {!receiptData ? (
+              <button type="button" onClick={loadReceiptData} disabled={loadingReceiptData}
+                className="w-full border border-dashed border-gray-300 rounded-lg px-4 py-2 text-sm font-medium text-blue-700 bg-blue-50/40 hover:bg-blue-50 disabled:opacity-50">
+                {loadingReceiptData ? "Loading extracted data…" : `📄 Show extracted data & receipt text${loadingReceiptData ? "" : " · lazy"}`}
+              </button>
+            ) : (
+              <>
+                {receiptData.original_text && (
+                  <div className="mb-3">
+                    <p className="text-gray-500 mb-1">Original receipt text</p>
+                    <pre className="bg-gray-50 border rounded p-2 text-xs whitespace-pre-wrap">{receiptData.original_text}</pre>
+                  </div>
+                )}
+                {Object.keys(receiptData.extracted_data || {}).length > 0 && (
+                  <div>
+                    <p className="text-gray-500 mb-1">Extracted data</p>
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      {Object.entries(receiptData.extracted_data)
+                        .filter(([, v]) => v !== null && v !== "")
+                        .map(([k, v]) => (
+                          <div key={k}><span className="text-gray-400">{k}</span>: {String(v)}</div>
+                        ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
           </div>
         )}
         {previewKind && (
@@ -323,25 +395,16 @@ export default function ClaimDetailPage() {
             onClose={closeViewer}
           />
         )}
-        {claim.receipt?.extracted_data && (
-          <div className="col-span-2">
-            <p className="text-gray-500 mb-1">Extracted data</p>
-            <div className="grid grid-cols-2 gap-2 text-xs">
-              {Object.entries(claim.receipt.extracted_data)
-                .filter(([, v]) => v !== null && v !== "")
-                .map(([k, v]) => (
-                  <div key={k}><span className="text-gray-400">{k}</span>: {String(v)}</div>
-                ))}
-            </div>
-          </div>
-        )}
       </div>
 
-      {claim.duplicate_matches?.length > 0 && (
+      {/* Lazy duplicate analysis: auto-fetched only when the backend reports a
+          payment tier; otherwise available behind an explicit check button. */}
+      {claim.duplicate_tier && !dupInfo && <p className="text-xs text-gray-500 mb-4">Checking duplicate anchors…</p>}
+      {dupInfo && dupInfo.matches?.length > 0 && (
         <div className="bg-amber-50 border border-amber-300 rounded-lg p-4 mb-4 text-sm">
           <p className="font-semibold">⚠ Similar claims exist</p>
           <ul className="mt-1 space-y-1">
-            {claim.duplicate_matches.map((m: any) => (
+            {dupInfo.matches.map((m: any) => (
               <li key={m.claim_id}>
                 <Link href={`/claims/${m.claim_id}`} className="text-blue-600 hover:underline">
                   {m.claim_number} — {m.merchant} — {inr(m.amount)} — {m.date} ({m.user_name}) — {m.score}%
@@ -349,6 +412,18 @@ export default function ClaimDetailPage() {
               </li>
             ))}
           </ul>
+        </div>
+      )}
+      {!claim.duplicate_tier && (
+        <div className="mb-4">
+          {!dupInfo ? (
+            <button type="button" onClick={loadDuplicates} disabled={loadingDup}
+              className="text-xs font-medium text-gray-500 hover:text-blue-600 disabled:opacity-50">
+              {loadingDup ? "Checking for similar claims…" : "🔍 Check for similar claims · lazy"}
+            </button>
+          ) : (
+            <p className="text-xs text-gray-400">No similar claims found.</p>
+          )}
         </div>
       )}
 
@@ -486,44 +561,57 @@ export default function ClaimDetailPage() {
         </div>
       )}
 
-      <h2 className="text-sm font-semibold text-gray-500 uppercase mb-2">History</h2>
+      {/* Lazy History: summary rows come with the core ticket; full metadata
+          payloads load only when the details are expanded. */}
+      <div className="flex items-center gap-3 mb-2">
+        <h2 className="text-sm font-semibold text-gray-500 uppercase">History</h2>
+        <button type="button" onClick={loadAudit}
+          className="text-xs font-medium text-blue-600 hover:underline">
+          {showHistory ? "Hide details" : `Show details (${claim.audit?.length || 0})`}
+          {loadingAudit && " · loading…"}
+        </button>
+      </div>
       <ol className="bg-white rounded-lg shadow p-4 space-y-3 text-sm">
-        {claim.audit?.map((a: any, i: number) => (
+        {(showHistory && auditFull ? auditFull : claim.audit)?.map((a: any, i: number) => (
           <li key={i} className="border-l-2 border-gray-200 pl-3">
             <p className="font-medium">{ACTION_LABELS[a.action] || a.action}</p>
             <p className="text-xs text-gray-500">{fmtDateTime(a.created_at)} · {a.user_name || "system"}</p>
-            {a.action === "CLAIM_REJECTED" && a.meta?.reason && <p className="text-xs text-red-600">{a.meta.reason}</p>}
-            {a.action === "CLAIM_SENT_BACK" && a.meta?.feedback && (
-              <p className="text-xs text-orange-700">{a.meta.feedback.reason}</p>
-            )}
-            {a.action === "CLAIM_RETURNED_TO_MANAGER" && a.meta?.feedback && (
-              <p className="text-xs text-amber-700">{a.meta.feedback.reason}</p>
-            )}
-            {(a.action === "PAYMENT_BLOCKED" || a.action === "DUPLICATE_DISMISSED") && a.meta?.compared && (
-              <details className="text-xs mt-1">
-                <summary className="cursor-pointer text-gray-600">
-                  tier {a.meta.tier} {a.action === "DUPLICATE_DISMISSED" && "· justified"} — anchor comparison
-                </summary>
-                <pre className="bg-gray-50 border rounded p-2 mt-1 overflow-x-auto whitespace-pre-wrap">
-                  {JSON.stringify(a.meta, null, 2)}
-                </pre>
-              </details>
-            )}
-            {a.action === "CLAIM_UPDATED" && a.meta?.fields && (
-              <details className="text-xs mt-1">
-                <summary className="cursor-pointer text-gray-600">field changes</summary>
-                <pre className="bg-gray-50 border rounded p-2 mt-1 overflow-x-auto whitespace-pre-wrap">
-                  {JSON.stringify(a.meta.fields, null, 2)}
-                </pre>
-              </details>
-            )}
-            {a.action === "RECEIPT_FILE_ACCESSED" && (
-              <p className="text-xs text-gray-600">
-                {a.meta?.filename} {(a.meta?.served_from || a.meta?.tier) ? `· served from ${a.meta?.served_from || a.meta?.tier}` : ""}
-              </p>
-            )}
-            {a.action === "CLAIM_EDIT_BLOCKED" && (
-              <p className="text-xs text-red-600">attempted {a.meta?.attempted_fields?.join(", ")} on a {a.meta?.status} claim</p>
+            {(showHistory && auditFull) && (
+              <>
+                {a.action === "CLAIM_REJECTED" && a.meta?.reason && <p className="text-xs text-red-600">{a.meta.reason}</p>}
+                {a.action === "CLAIM_SENT_BACK" && a.meta?.feedback && (
+                  <p className="text-xs text-orange-700">{a.meta.feedback.reason}</p>
+                )}
+                {a.action === "CLAIM_RETURNED_TO_MANAGER" && a.meta?.feedback && (
+                  <p className="text-xs text-amber-700">{a.meta.feedback.reason}</p>
+                )}
+                {(a.action === "PAYMENT_BLOCKED" || a.action === "DUPLICATE_DISMISSED") && a.meta?.compared && (
+                  <details className="text-xs mt-1">
+                    <summary className="cursor-pointer text-gray-600">
+                      tier {a.meta.tier} {a.action === "DUPLICATE_DISMISSED" && "· justified"} — anchor comparison
+                    </summary>
+                    <pre className="bg-gray-50 border rounded p-2 mt-1 overflow-x-auto whitespace-pre-wrap">
+                      {JSON.stringify(a.meta, null, 2)}
+                    </pre>
+                  </details>
+                )}
+                {a.action === "CLAIM_UPDATED" && a.meta?.fields && (
+                  <details className="text-xs mt-1">
+                    <summary className="cursor-pointer text-gray-600">field changes</summary>
+                    <pre className="bg-gray-50 border rounded p-2 mt-1 overflow-x-auto whitespace-pre-wrap">
+                      {JSON.stringify(a.meta.fields, null, 2)}
+                    </pre>
+                  </details>
+                )}
+                {a.action === "RECEIPT_FILE_ACCESSED" && (
+                  <p className="text-xs text-gray-600">
+                    {a.meta?.filename} {(a.meta?.served_from || a.meta?.tier) ? `· served from ${a.meta?.served_from || a.meta?.tier}` : ""}
+                  </p>
+                )}
+                {a.action === "CLAIM_EDIT_BLOCKED" && (
+                  <p className="text-xs text-red-600">attempted {a.meta?.attempted_fields?.join(", ")} on a {a.meta?.status} claim</p>
+                )}
+              </>
             )}
           </li>
         ))}

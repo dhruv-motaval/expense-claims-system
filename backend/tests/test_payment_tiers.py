@@ -54,8 +54,8 @@ def test_tier_A_same_file_blocked(c):
     r = c.post(f"/api/claims/{c2['id']}/pay", headers=priya)
     assert r.status_code == 422, r.text
     assert "already been paid" in r.json()["detail"]
-    detail = c.get(f"/api/claims/{c2['id']}", headers=riya).json()
-    t = next(x for x in detail["audit"] if x["action"] == "PAYMENT_BLOCKED")
+    detail = c.get(f"/api/claims/{c2['id']}/audit", headers=riya).json()
+    t = next(x for x in detail if x["action"] == "PAYMENT_BLOCKED")
     assert t["meta"]["tier"] == "A" and t["meta"]["basis"] == "checksum"
 
 
@@ -66,8 +66,8 @@ def test_tier_B_same_receipt_number_blocked_despite_rewording(c):
     c2 = make_and_approve(c, riya, arjun, "UBER RIDES PVT", d, 480, receipt_no="UB-984213 X")
     r = c.post(f"/api/claims/{c2['id']}/pay", headers=priya)
     assert r.status_code == 422, r.text
-    detail = c.get(f"/api/claims/{c2['id']}", headers=riya).json()
-    t = next(x for x in detail["audit"] if x["action"] == "PAYMENT_BLOCKED")
+    detail = c.get(f"/api/claims/{c2['id']}/audit", headers=riya).json()
+    t = next(x for x in detail if x["action"] == "PAYMENT_BLOCKED")
     assert t["meta"]["tier"] == "B" and t["meta"]["basis"] == "receipt_no"
     anchors = t["meta"]["compared"]["receipt_no"]
     assert anchors["equal"] is True and anchors["this"] and anchors["other"]

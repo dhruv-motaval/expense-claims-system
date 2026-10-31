@@ -27,8 +27,8 @@ def make_claim(c, headers, **over):
 
 
 def audit_actions(c, headers, claim_id):
-    detail = c.get(f"/api/claims/{claim_id}", headers=headers).json()
-    return detail["audit"]
+    # audit metadata is now served by the lazy full-audit endpoint
+    return c.get(f"/api/claims/{claim_id}/audit", headers=headers).json()
 
 
 def test_normalize_on_write(c):

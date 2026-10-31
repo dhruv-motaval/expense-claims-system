@@ -51,8 +51,8 @@ def test_manager_send_back_full_loop(c):
 
     res = c.post(f"/api/claims/{claim['id']}/submit", headers=neha)
     assert res.status_code == 200
-    detail = c.get(f"/api/claims/{claim['id']}", headers=neha).json()
-    sub_tickets = [t for t in detail["audit"] if t["action"] == "CLAIM_SUBMITTED"]
+    detail = c.get(f"/api/claims/{claim['id']}/audit", headers=neha).json()
+    sub_tickets = [t for t in detail if t["action"] == "CLAIM_SUBMITTED"]
     assert sub_tickets[-1]["meta"]["resubmission_count"] == 2
 
     # and the manager can approve the revision
