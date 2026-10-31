@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, getToken, useMe } from "@/lib/auth";
 import { inr, fmtDate, fmtDateTime } from "@/lib/format";
 import { ErrorBox, Shell, StatusBadge, TierBadge } from "@/components/ui";
+import { ReceiptViewer } from "@/components/receipt-viewer";
 
 const ACTION_LABELS: Record<string, string> = {
   CLAIM_CREATED: "Claim created",
@@ -139,10 +140,12 @@ export default function ClaimDetailPage() {
   const [sbFlagged, setSbFlagged] = useState<string[]>([]);
   const [returning, setReturning] = useState(false);       // finance: return to manager
   const [pageUrls, setPageUrls] = useState<string[]>([]);
-  const [previewKind, setPreviewKind] = useState<"" | "pdf" | "image">("");
-  const [originalUrl, setOriginalUrl] = useState("");
+  const [previewKind, setPreviewKind] = useState<"" | "pdf" | "image" | "pages">("");
   const [payJust, setPayJust] = useState(false);      // tier-C justification modal
   const [justification, setJustification] = useState("");
+  // Lazy receipt viewer: nothing is downloaded until the user asks for it.
+  // viewer = { mode, loading } → then src/srcs once the authorized blob is here.
+  const [viewer, setViewer] = useState<null | { mode: "image" | "pdf" | "pages"; loading: boolean; src?: string; srcs?: string[] }>(null);
   const objectUrlsRef = useRef<string[]>([]);          // blob URLs to revoke
 
   const revokeAll = () => {
@@ -151,52 +154,69 @@ export default function ClaimDetailPage() {
   };
   useEffect(() => revokeAll, []);                      // unmount cleanup
 
+  const revokeViewer = () => {
+    if (viewer) revokeAll();
+  };
+
+  const closeViewer = useCallback(() => {
+    setViewer((v) => { if (v) revokeAll(); return null; });
+  }, []);
+
   const load = useCallback(() => {
     revokeAll();
-    setPageUrls([]); setOriginalUrl(""); 
-    api(`/claims/${id}`).then(async (c: any) => {
+    setPageUrls([]); setPreviewKind("");
+    api(`/claims/${id}`).then((c: any) => {
       setClaim(c);
-      try {
-        // Receipt preview: PDFs are shown via the authorized original-PDF
-        // endpoint (browser-native PDF viewer); images via the same endpoint.
-        // Legacy receipts with persisted page images fall back to page previews.
-        const rec = c.receipt;
-        if (!rec || (!rec.s3_image_key && !rec.image_path) || !rec.id) return;
-        const token = getToken() || "";
-        if (rec.has_pages) {
-          try {
-            const d = await api(`/receipts/pages/${rec.id}`);
-            const urls: string[] = [];
-            for (const p of d.pages || []) {
-              const isPresigned = p.url.startsWith("http");
-              const res = await fetch(p.url, isPresigned ? {} : { headers: { Authorization: `Bearer ${token}` } });
-              if (res.ok) {
-                const u = URL.createObjectURL(await res.blob());
-                objectUrlsRef.current.push(u);
-                urls.push(u);
-              }
-            }
-            if (urls.length) { setPageUrls(urls); return; }
-          } catch { /* fall through to original-file preview */ }
-        }
-        const res = await fetch(`/api/receipts/image/${rec.id}`, { headers: { Authorization: `Bearer ${token}` } });
-        if (res.ok) {
-          const blob = await res.blob();
-          const url = URL.createObjectURL(blob);
-          objectUrlsRef.current.push(url);
-          if (rec.content_type === "application/pdf" || rec.s3_image_key?.endsWith(".pdf")) {
-            setPreviewKind("pdf");
-          } else {
-            setPreviewKind("image");
-          }
-          setOriginalUrl(url);
-        }
-      } catch {
-        /* preview is best-effort */
-      }
+      // Receipts are NOT fetched here: images/PDFs load on demand via
+      // openViewer(), keeping the detail page light until a reviewer asks.
+      const rec = c.receipt;
+      if (!rec) return;
+      const ct = rec.content_type || (rec.s3_image_key || "");
+      if (ct.includes("pdf")) setPreviewKind("pdf");
+      else if (rec.has_pages) setPreviewKind("pages");
+      else if (rec.s3_image_key || rec.image_path) setPreviewKind("image");
     }).catch((e) => setError(e.message));
   }, [id]);
   useEffect(load, [load]);
+
+  async function openViewer() {
+    const c = claim;
+    const rec = c?.receipt;
+    if (!rec || !rec.id) { setViewer(null); return; }
+    setPreviewKind("");
+    setViewer({ mode: rec.has_pages ? "pages" : rec.content_type === "application/pdf" || rec.s3_image_key?.endsWith(".pdf") ? "pdf" : "image", loading: true });
+    try {
+      const token = getToken() || "";
+      const isPdf = rec.content_type === "application/pdf" || rec.s3_image_key?.endsWith(".pdf");
+      if (rec.has_pages) {
+        const d = await api(`/receipts/pages/${rec.id}`);
+        const urls: string[] = [];
+        for (const p of d.pages || []) {
+          const isPresigned = p.url.startsWith("http");
+          const res = await fetch(p.url, isPresigned ? {} : { headers: { Authorization: `Bearer ${token}` } });
+          if (res.ok) {
+            const u = URL.createObjectURL(await res.blob());
+            objectUrlsRef.current.push(u);
+            urls.push(u);
+          }
+        }
+        if (urls.length) { setViewer({ mode: "pages", loading: false, srcs: urls }); return; }
+        // fall through to the original file if page listing failed
+      }
+      const res = await fetch(`/api/receipts/image/${rec.id}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (res.ok) {
+        const url = URL.createObjectURL(await res.blob());
+        objectUrlsRef.current.push(url);
+        setViewer({ mode: isPdf ? "pdf" : "image", loading: false, src: url });
+      } else {
+        setError("Could not open the receipt file.");
+        setViewer(null);
+      }
+    } catch {
+      setError("Could not open the receipt file.");
+      setViewer(null);
+    }
+  }
 
   async function act(action: string, body?: any) {
     setBusy(action); setError("");
@@ -276,34 +296,35 @@ export default function ClaimDetailPage() {
             <pre className="bg-gray-50 border rounded p-2 text-xs whitespace-pre-wrap">{claim.receipt.original_text}</pre>
           </div>
         )}
-        {previewKind === "pdf" && originalUrl && (
+        {previewKind && (
           <div className="col-span-2">
-            <p className="text-gray-500 mb-1">Original receipt (PDF preview)</p>
-            {/* sandboxed: the blob renders, but nothing in it can execute */}
-            <iframe src={originalUrl} title="Receipt PDF preview" sandbox="allow-same-origin"
-              className="w-full h-96 rounded border bg-gray-50" />
-            <a href={originalUrl} download={claim.receipt?.original_filename || "receipt.pdf"}
-              className="text-xs text-blue-600 hover:underline">Download original PDF</a>
+            <button
+              type="button"
+              onClick={openViewer}
+              className="group flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 transition hover:border-blue-400 hover:bg-blue-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-white text-xl shadow-sm group-hover:text-blue-600">🧾</span>
+              <span className="text-left">
+                <span className="block text-sm font-semibold text-slate-800">Show original receipt</span>
+                <span className="block text-xs text-slate-500">
+                  Full screen with zoom &amp; download · {previewKind === "pdf" ? "PDF" : previewKind === "pages" ? "scanned pages" : "image"}
+                </span>
+              </span>
+              <span aria-hidden className="ml-2 text-blue-600 group-hover:translate-x-0.5 transition-transform">→</span>
+            </button>
           </div>
         )}
-        {previewKind === "image" && originalUrl && (
-          <div className="col-span-2">
-            <p className="text-gray-500 mb-1">Original receipt</p>
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={originalUrl} alt="Receipt" className="max-h-72 rounded border" />
-          </div>
-        )}
-        {pageUrls.length > 0 && (
-          <div className="col-span-2">
-            <p className="text-gray-500 mb-1">Receipt pages</p>
-            <div className="flex flex-wrap gap-2">
-              {pageUrls.map((u, i) => (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img key={i} src={u} alt={`Receipt page ${i + 1}`}
-                  className="h-40 w-auto rounded border" />
-              ))}
-            </div>
-          </div>
+        {viewer && (
+          <ReceiptViewer
+            mode={viewer.mode}
+            loading={viewer.loading}
+            src={viewer.src}
+            srcs={viewer.srcs}
+            filename={claim.receipt?.original_filename || `receipt-${claim.claim_number}`}
+            title={claim.receipt?.original_filename || `Receipt · ${claim.claim_number}`}
+            onClose={closeViewer}
+          />
         )}
         {claim.receipt?.extracted_data && (
           <div className="col-span-2">
