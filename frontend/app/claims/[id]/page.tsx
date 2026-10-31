@@ -154,10 +154,6 @@ export default function ClaimDetailPage() {
   };
   useEffect(() => revokeAll, []);                      // unmount cleanup
 
-  const revokeViewer = () => {
-    if (viewer) revokeAll();
-  };
-
   const closeViewer = useCallback(() => {
     setViewer((v) => { if (v) revokeAll(); return null; });
   }, []);
@@ -183,7 +179,8 @@ export default function ClaimDetailPage() {
     const c = claim;
     const rec = c?.receipt;
     if (!rec || !rec.id) { setViewer(null); return; }
-    setPreviewKind("");
+    // NOTE: previewKind stays untouched — the "Show original receipt" button
+    // must keep rendering so the viewer can be re-opened any number of times.
     setViewer({ mode: rec.has_pages ? "pages" : rec.content_type === "application/pdf" || rec.s3_image_key?.endsWith(".pdf") ? "pdf" : "image", loading: true });
     try {
       const token = getToken() || "";

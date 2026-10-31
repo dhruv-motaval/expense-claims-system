@@ -962,6 +962,7 @@ def reports(db: Session) -> dict:
 
 
 def claim_dict(c: Claim) -> dict:
+    rec = c.receipt
     return {
         "id": c.id, "claim_number": c.claim_number, "user_id": c.user_id,
         "user_name": c.user.name if c.user else None, "merchant": c.merchant,
@@ -969,7 +970,17 @@ def claim_dict(c: Claim) -> dict:
         "amount": float(c.amount), "currency": c.currency, "description": c.description,
         "receipt_no": c.receipt_no, "trans_time": c.trans_time,
         "status": c.status, "rejection_reason": c.rejection_reason,
-        "has_receipt_image": bool(c.receipt and (c.receipt.image_path or c.receipt.s3_image_key)),
+        "has_receipt_image": bool(rec and (rec.image_path or rec.s3_image_key)),
+        # The receipt file travels with the ticket: id + where the bytes live
+        # right now (hot local path or cold S3 key), so every dashboard, report
+        # and archive export knows exactly where the original is. When storage
+        # moves the file (hot → cold), these fields update automatically.
+        "receipt_id": rec.id if rec else None,
+        "receipt_file": (rec.s3_image_key or rec.image_path) if rec else None,
+        "receipt_storage_tier": rec.storage_tier if rec else None,
+        "receipt_filename": rec.original_filename if rec else None,
+        "receipt_content_type": rec.content_type if rec else None,
+        "receipt_file_size": rec.file_size if rec else None,
         "submitted_at": c.submitted_at.isoformat() if c.submitted_at else None,
         "approved_at": c.approved_at.isoformat() if c.approved_at else None,
         "paid_at": c.paid_at.isoformat() if c.paid_at else None,

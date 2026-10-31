@@ -9,6 +9,28 @@ export interface ClaimRow {
   returned_from_finance?: boolean;
   finance_feedback?: { reason?: string | null; flagged_fields?: string[] } | null;
   returned_by?: string | null;
+  /* receipt file location travels with the ticket data */
+  receipt_id?: number | null;
+  receipt_file?: string | null;
+  receipt_storage_tier?: string | null;
+  receipt_filename?: string | null;
+  receipt_content_type?: string | null;
+  receipt_file_size?: number | null;
+}
+
+/** Small chip on a claim row: shows at a glance that the original receipt file
+ *  is attached, and the tier it physically lives in (hot = active storage). */
+export function ReceiptChip({ row }: { row: ClaimRow }) {
+  if (!row.has_receipt_image) return null;
+  const hot = row.receipt_storage_tier !== "COLD";
+  return (
+    <span
+      title={`Receipt attached: ${row.receipt_filename || "file"} · stored ${hot ? "hot (active)" : "cold (archived)"}`}
+      className={`ml-1.5 align-middle text-[10px] font-bold px-1.5 py-0.5 rounded ${hot ? "bg-blue-100 text-blue-700" : "bg-gray-200 text-gray-600"}`}
+    >
+      🧾 {hot ? "hot" : "cold"}
+    </span>
+  );
 }
 
 export default function ClaimTable({ claims, showEmployee, showFinanceNote }: { claims: ClaimRow[]; showEmployee?: boolean; showFinanceNote?: boolean }) {
@@ -34,6 +56,7 @@ export default function ClaimTable({ claims, showEmployee, showFinanceNote }: { 
               <Link href={`/claims/${c.id}`} className="text-blue-600 hover:underline font-medium">
                 {c.claim_number}
               </Link>
+              <ReceiptChip row={c} />
             </td>
             {showEmployee && <td className="px-3 py-2">{c.user_name}</td>}
             <td className="px-3 py-2">{c.merchant}</td>
