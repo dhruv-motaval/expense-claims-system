@@ -6,10 +6,13 @@ export interface ClaimRow {
   id: number; claim_number: string; user_id: number; user_name?: string;
   merchant: string; transaction_date: string; category: string; amount: number;
   status: string; rejection_reason?: string | null; has_receipt_image?: boolean;
+  returned_from_finance?: boolean;
+  finance_feedback?: { reason?: string | null; flagged_fields?: string[] } | null;
+  returned_by?: string | null;
 }
 
-export default function ClaimTable({ claims, showEmployee }: { claims: ClaimRow[]; showEmployee?: boolean }) {
-  if (!claims.length) return <p className="text-gray-500 text-sm py-4">No claims yet.</p>;
+export default function ClaimTable({ claims, showEmployee, showFinanceNote }: { claims: ClaimRow[]; showEmployee?: boolean; showFinanceNote?: boolean }) {
+  if (!claims.length) return <p className="text-gray-500 text-sm py-4">No claims here right now.</p>;
   return (
     <table className="w-full bg-white rounded-lg shadow text-sm">
       <thead>
@@ -21,6 +24,7 @@ export default function ClaimTable({ claims, showEmployee }: { claims: ClaimRow[
           <th className="px-3 py-2">Category</th>
           <th className="px-3 py-2 text-right">Amount</th>
           <th className="px-3 py-2">Status</th>
+          {showFinanceNote && <th className="px-3 py-2">Finance note</th>}
         </tr>
       </thead>
       <tbody>
@@ -37,6 +41,13 @@ export default function ClaimTable({ claims, showEmployee }: { claims: ClaimRow[
             <td className="px-3 py-2">{c.category}</td>
             <td className="px-3 py-2 text-right font-medium">{inr(c.amount)}</td>
             <td className="px-3 py-2"><StatusBadge status={c.status} /></td>
+            {showFinanceNote && (
+              <td className="px-3 py-2 max-w-[26ch]">
+                {c.finance_feedback?.reason
+                  ? <span className="text-amber-800">“{c.finance_feedback.reason}”<span className="block text-xs text-gray-500">— {c.returned_by || "Finance"}</span></span>
+                  : <span className="text-gray-400">—</span>}
+              </td>
+            )}
           </tr>
         ))}
       </tbody>

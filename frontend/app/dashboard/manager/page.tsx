@@ -6,6 +6,26 @@ import { inr } from "@/lib/format";
 import { Card, Shell } from "@/components/ui";
 import ClaimTable, { LimitProgress } from "@/components/claims";
 
+/** A titled queue block for one kind of work the manager must handle. */
+function Queue({ title, subtitle, count, tone, children }: {
+  title: string; subtitle?: string; count: number; tone: "blue" | "amber"; children: React.ReactNode;
+}) {
+  const badge = tone === "amber"
+    ? "bg-amber-100 text-amber-800 border-amber-300"
+    : "bg-blue-100 text-blue-800 border-blue-300";
+  if (!count) return null;
+  return (
+    <section className="mb-6">
+      <div className="flex items-center gap-2 mb-2">
+        <h2 className="text-sm font-semibold text-gray-700 uppercase">{title}</h2>
+        <span className={`text-xs font-bold px-2 py-0.5 rounded-full border ${badge}`}>{count}</span>
+      </div>
+      {subtitle && <p className="text-xs text-gray-500 mb-2">{subtitle}</p>}
+      {children}
+    </section>
+  );
+}
+
 export default function ManagerDashboard() {
   const [data, setData] = useState<any>(null);
   const [error, setError] = useState("");
@@ -26,6 +46,24 @@ export default function ManagerDashboard() {
             <Card title="Rejected" value={String(data.rejected)} />
             <Card title="Team Spend" value={inr(data.team_spend)} />
           </div>
+
+          {/* The two work queues, in the order the manager should handle them */}
+          <Queue
+            title="↩ Returned by finance — your re-review"
+            subtitle="Finance sent these back with a note. Read the note, fix with your team member if needed, then approve or reject."
+            count={(data.returned_from_finance || []).length}
+            tone="amber"
+          >
+            <ClaimTable claims={data.returned_from_finance} showEmployee showFinanceNote />
+          </Queue>
+
+          <Queue
+            title="🆕 New requests — waiting for approval"
+            count={(data.new_requests || []).length}
+            tone="blue"
+          >
+            <ClaimTable claims={data.new_requests} showEmployee />
+          </Queue>
 
           <h2 className="text-sm font-semibold text-gray-500 uppercase mb-2">Team Limits</h2>
           <div className="bg-white rounded-lg shadow p-4 mb-6 space-y-4">

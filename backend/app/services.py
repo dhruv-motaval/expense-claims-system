@@ -861,15 +861,44 @@ def manager_dashboard(db: Session, user: User) -> dict:
                              .order_by(Claim.id.desc()).limit(100)))
     first, _ = month_bounds()
     team_only = [c for c in claims if c.user_id != user.id]
+
+    def latest_audit_action(claim_id: int) -> str | None:
+        ev = db.scalars(select(AuditEvent).where(AuditEvent.claim_id == claim_id)
+                        .order_by(AuditEvent.id.desc()).limit(1)).first()
+        return ev.action if ev else None
+
+    # Split what needs the manager's attention into two buckets: brand-new
+    # requests vs claims finance pushed back for re-review. A returned claim
+    # is a SUBMITTED claim whose latest audit event is the finance return.
+    finance_returns: dict[int, dict] = {}
+    for c in team_only:
+        if c.status == Status.SUBMITTED.value and latest_audit_action(c.id) == "CLAIM_RETURNED_TO_MANAGER":
+            fb = get_ticket_feedback(db, c, ("CLAIM_RETURNED_TO_MANAGER",))
+            if fb:
+                finance_returns[c.id] = fb
+
+    claims_out = [claim_dict(c) for c in claims]
+    for d in claims_out:
+        fb = finance_returns.get(d["id"])
+        if fb:
+            ticket = fb["meta"].get("feedback") or {}
+            d["returned_from_finance"] = True
+            d["finance_feedback"] = {"reason": ticket.get("reason"),
+                                     "flagged_fields": ticket.get("flagged_fields") or []}
+            d["returned_by"] = fb["user_name"]
+            d["returned_at"] = fb["created_at"]
+
     return {
         "pending_approval": sum(1 for c in team_only if c.status == Status.SUBMITTED.value),
+        "new_requests": [d for d in claims_out if d["status"] == Status.SUBMITTED.value and not d.get("returned_from_finance")],
+        "returned_from_finance": [d for d in claims_out if d.get("returned_from_finance")],
         "approved_this_month": sum(1 for c in team_only if c.status == Status.APPROVED.value and c.approved_at and c.approved_at.date() >= first),
         "rejected": sum(1 for c in team_only if c.status == Status.REJECTED.value),
         "team_spend": sum(float(c.amount) for c in team_only if c.status in (Status.APPROVED.value, Status.PAID.value) and first <= c.transaction_date < month_bounds()[1]),
         "team_members": [{"id": u.id, "name": u.name, "limit": float(u.monthly_limit),
                           **limit_status(monthly_spend(db, u.id), float(u.monthly_limit))}
                          for u in db.scalars(select(User).where(User.manager_id == user.id))],
-        "claims": [claim_dict(c) for c in claims],
+        "claims": claims_out,
     }
 
 
