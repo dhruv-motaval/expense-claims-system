@@ -1,4 +1,6 @@
 import os
+import shutil
+import tempfile
 
 os.environ["DATABASE_URL"] = "sqlite:///:memory:"
 os.environ["SECRET_KEY"] = "test-secret"
@@ -7,6 +9,11 @@ os.environ["SECRET_KEY"] = "test-secret"
 os.environ["STORAGE_BACKEND"] = "local"
 os.environ["MINIO_ENDPOINT"] = ""
 os.environ["AI_API_KEY"] = ""
+# Isolation: uploads written by tests must never land in the developer's real
+# storage tree (it holds live receipts). Point STORAGE_DIR at a disposable
+# temp directory before app.db imports it.
+_TEST_STORAGE_DIR = os.path.join(tempfile.gettempdir(), "expense-claims-test-storage")
+os.environ["STORAGE_DIR"] = _TEST_STORAGE_DIR
 
 from fastapi.testclient import TestClient
 import pytest
@@ -44,3 +51,8 @@ def login(client, email):
     r = client.post("/api/auth/login", json={"email": email})
     assert r.status_code == 200
     return {"Authorization": f"Bearer {r.json()['token']}"}
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Remove the disposable test storage directory."""
+    shutil.rmtree(_TEST_STORAGE_DIR, ignore_errors=True)
