@@ -988,10 +988,10 @@ def claim_dict(c: Claim) -> dict:
 
 
 def claim_detail(db: Session, user: User, claim: Claim) -> dict:
-    """Lightweight core ticket: identity, status, receipt POINTER, feedback and
-    an audit summary. Every heavy payload (OCR text, extracted data, audit
-    metadata, duplicate analysis) loads on demand from its own endpoint, so
-    opening a ticket never drags big blobs along."""
+    """Full ticket: identity, status, receipt pointer + text payloads, feedback,
+    full audit and duplicate analysis. All details render immediately when the
+    ticket is opened — ONLY the original receipt file itself stays lazy (the
+    browser fetches those bytes via the image endpoint when the user asks)."""
     require_claim_view(user, claim)
     d = claim_dict(claim)
     d["receipt"] = None
@@ -1002,15 +1002,15 @@ def claim_detail(db: Session, user: User, claim: Claim) -> dict:
             "source_type": rec.source_type,
             "image_path": rec.image_path,
             "s3_image_key": rec.s3_image_key,
+            "original_text": rec.original_text,
             "original_filename": rec.original_filename,
             "content_type": rec.content_type,
             "file_size": rec.file_size,
             "checksum_sha256": rec.checksum_sha256,
             "processing_status": rec.processing_status,
+            "extracted_data": rec.extracted_data,
             "has_pages": bool(rec.s3_pages_keys),
             "storage_tier": getattr(rec, "storage_tier", "HOT"),
-            # NOTE: extracted_data and original_text intentionally excluded —
-            # they arrive via /claims/{id}/receipt-data when the user asks.
         }
     d["latest_feedback"] = get_ticket_feedback(
         db, claim, ("CLAIM_SENT_BACK", "CLAIM_RETURNED_TO_MANAGER"))
@@ -1018,13 +1018,12 @@ def claim_detail(db: Session, user: User, claim: Claim) -> dict:
     tier, _, _ = identity_match(db, claim)
     if tier:
         d["duplicate_tier"] = tier
-    # audit summary WITHOUT payloads: action + actor + time only. Full audit
-    # (with metadata / JSON payloads) loads via /claims/{id}/audit.
     d["audit"] = [{
-        "action": a.action,
+        "action": a.action, "meta": a.meta,
         "user_name": a.user.name if a.user else None,
         "created_at": a.created_at.isoformat(),
     } for a in claim.audits]
+    d["duplicate_matches"] = duplicate_flags(db, claim, exclude_id=claim.id)
     return d
 
 
