@@ -40,25 +40,25 @@ export default function EditClaimPage() {
 
   return (
     <Shell>
-      <h1 className="text-xl font-bold mb-4">Edit Claim</h1>
+      <h1 className="text-[22px] font-semibold tracking-tight text-slate-900 mb-4">Edit Claim</h1>
       {form && (
-        <div className="bg-white rounded-lg shadow p-4 max-w-xl space-y-3">
+        <div className="rounded-xl border border-slate-200 bg-white p-4 max-w-xl space-y-3">
           <div className="grid grid-cols-2 gap-3">
             <label className="text-sm">
               <span className="block font-medium mb-1">Merchant</span>
               <input value={form.merchant} onChange={(e) => setForm({ ...form, merchant: e.target.value })}
-                className="w-full border rounded px-3 py-2" required />
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" required />
             </label>
             <label className="text-sm">
               <span className="block font-medium mb-1">Date</span>
               <input type="date" value={form.transaction_date}
                 onChange={(e) => setForm({ ...form, transaction_date: e.target.value })}
-                className="w-full border rounded px-3 py-2" required />
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" required />
             </label>
             <label className="text-sm">
               <span className="block font-medium mb-1">Category</span>
               <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}
-                className="w-full border rounded px-3 py-2">
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
                 {CATEGORIES.map((c) => <option key={c}>{c}</option>)}
               </select>
             </label>
@@ -66,33 +66,33 @@ export default function EditClaimPage() {
               <span className="block font-medium mb-1">Amount (₹)</span>
               <input type="number" min="0.01" step="0.01" value={form.amount}
                 onChange={(e) => setForm({ ...form, amount: e.target.value })}
-                className="w-full border rounded px-3 py-2" required />
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" required />
             </label>
             <label className="text-sm">
               <span className="block font-medium mb-1">
                 Receipt No.
-                <span className="block text-xs font-normal text-gray-500">Duplicate checks match on this — type it exactly as printed</span>
+                <span className="block text-xs font-normal text-slate-500">Duplicate checks match on this — type it exactly as printed</span>
               </span>
               <input value={form.receipt_no} onChange={(e) => setForm({ ...form, receipt_no: e.target.value })}
-                placeholder="e.g. UB984213X" className="w-full border rounded px-3 py-2 font-mono font-medium" />
+                placeholder="e.g. UB984213X" className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono font-medium" />
             </label>
             <label className="text-sm">
               <span className="block font-medium mb-1">
                 Time
-                <span className="block text-xs font-normal text-gray-500">Transaction time (HH:MM or like 2:30 pm)</span>
+                <span className="block text-xs font-normal text-slate-500">Transaction time (HH:MM or like 2:30 pm)</span>
               </span>
               <input value={form.trans_time} onChange={(e) => setForm({ ...form, trans_time: e.target.value })}
-                placeholder="e.g. 14:22" className="w-full border rounded px-3 py-2 font-mono font-medium" />
+                placeholder="e.g. 14:22" className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono font-medium" />
             </label>
           </div>
           <label className="text-sm block">
             <span className="block font-medium mb-1">Description</span>
             <input value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })}
-              className="w-full border rounded px-3 py-2" />
+              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
           </label>
           <ErrorBox message={error} />
           <button onClick={save} disabled={busy}
-            className="bg-blue-600 text-white rounded px-4 py-2 text-sm font-medium hover:bg-blue-700 disabled:opacity-50">
+            className="h-9 rounded-lg bg-blue-600 px-4 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50">
             {busy ? "Saving..." : "Save"}
           </button>
         </div>

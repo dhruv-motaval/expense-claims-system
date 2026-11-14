@@ -3,26 +3,24 @@
 import { useEffect, useState } from "react";
 import { api } from "@/lib/auth";
 import { inr } from "@/lib/format";
-import { Card, Shell } from "@/components/ui";
+import { Card, Icon, PageHeader, Panel, Shell } from "@/components/ui";
 import ClaimTable, { LimitProgress } from "@/components/claims";
 
-/** A titled queue block for one kind of work the manager must handle. */
+/** A titled queue for one kind of work the manager must handle. */
 function Queue({ title, subtitle, count, tone, children }: {
   title: string; subtitle?: string; count: number; tone: "blue" | "amber"; children: React.ReactNode;
 }) {
-  const badge = tone === "amber"
-    ? "bg-amber-100 text-amber-800 border-amber-300"
-    : "bg-blue-100 text-blue-800 border-blue-300";
   if (!count) return null;
+  const badge = tone === "amber" ? "bg-amber-100 text-amber-800" : "bg-blue-100 text-blue-800";
   return (
-    <section className="mb-6">
-      <div className="flex items-center gap-2 mb-2">
-        <h2 className="text-sm font-semibold text-gray-700 uppercase">{title}</h2>
-        <span className={`text-xs font-bold px-2 py-0.5 rounded-full border ${badge}`}>{count}</span>
+    <Panel>
+      <div className="flex items-center gap-2 border-b border-slate-200 px-4 py-3.5">
+        <h2 className="text-sm font-semibold text-slate-900">{title}</h2>
+        <span className={`rounded-full px-2 py-0.5 text-xs font-bold ${badge}`}>{count}</span>
       </div>
-      {subtitle && <p className="text-xs text-gray-500 mb-2">{subtitle}</p>}
+      {subtitle && <p className="px-4 pt-3 text-xs text-slate-500">{subtitle}</p>}
       {children}
-    </section>
+    </Panel>
   );
 }
 
@@ -36,20 +34,20 @@ export default function ManagerDashboard() {
 
   return (
     <Shell>
-      <h1 className="text-xl font-bold mb-4">Manager Dashboard</h1>
+      <PageHeader title="Manager dashboard" subtitle="Approvals and team spend." />
       {error && <p className="text-red-600">{error}</p>}
       {data && (
         <>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
-            <Card title="Pending Approval" value={String(data.pending_approval)} />
-            <Card title="Approved This Month" value={String(data.approved_this_month)} />
-            <Card title="Rejected" value={String(data.rejected)} />
-            <Card title="Team Spend" value={inr(data.team_spend)} />
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <Card title="Pending approval" value={String(data.pending_approval)} icon="clock" tone="blue" />
+            <Card title="Approved this month" value={String(data.approved_this_month)} icon="check" tone="green" />
+            <Card title="Rejected" value={String(data.rejected)} icon="x" tone="red" />
+            <Card title="Team spend" value={inr(data.team_spend)} icon="wallet" tone="violet" />
           </div>
 
           {/* The two work queues, in the order the manager should handle them */}
           <Queue
-            title="↩ Returned by finance — your re-review"
+            title="Returned by finance — your re-review"
             subtitle="Finance sent these back with a note. Read the note, fix with your team member if needed, then approve or reject."
             count={(data.returned_from_finance || []).length}
             tone="amber"
@@ -57,27 +55,27 @@ export default function ManagerDashboard() {
             <ClaimTable claims={data.returned_from_finance} showEmployee showFinanceNote />
           </Queue>
 
-          <Queue
-            title="🆕 New requests — waiting for approval"
-            count={(data.new_requests || []).length}
-            tone="blue"
-          >
+          <Queue title="New requests — waiting for approval" count={(data.new_requests || []).length} tone="blue">
             <ClaimTable claims={data.new_requests} showEmployee />
           </Queue>
 
-          <h2 className="text-sm font-semibold text-gray-500 uppercase mb-2">Team Limits</h2>
-          <div className="bg-white rounded-lg shadow p-4 mb-6 space-y-4">
-            {data.team_members.map((m: any) => (
-              <div key={m.id}>
-                <p className="text-sm font-medium mb-1">{m.name}</p>
-                <LimitProgress spend={m.spend} limit={m.limit} />
-              </div>
-            ))}
-          </div>
+          <Panel title="Team limits" subtitle="Monthly spend against each member’s limit">
+            <div className="grid gap-5 p-4 md:grid-cols-2 xl:grid-cols-3">
+              {data.team_members.map((m: any) => (
+                <div key={m.id}>
+                  <p className="mb-1.5 text-[13px] font-medium text-slate-800">{m.name}</p>
+                  <LimitProgress spend={m.spend} limit={m.limit} />
+                </div>
+              ))}
+            </div>
+          </Panel>
 
-          <h2 className="text-sm font-semibold text-gray-500 uppercase mb-2">Team Claims</h2>
-          <ClaimTable claims={data.claims} showEmployee />
-          <p className="text-xs text-gray-500 mt-2">Note: you cannot approve your own claim — the server blocks it too.</p>
+          <Panel title="Team claims">
+            <ClaimTable claims={data.claims} showEmployee />
+          </Panel>
+          <p className="flex items-center gap-1.5 text-xs text-slate-500">
+            <Icon name="shield" className="h-3.5 w-3.5" /> You cannot approve your own claim — the server blocks it too.
+          </p>
         </>
       )}
     </Shell>

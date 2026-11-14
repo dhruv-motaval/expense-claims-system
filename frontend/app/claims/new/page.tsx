@@ -105,7 +105,7 @@ export default function NewClaimPage() {
 
       {!form && (
         <div className="space-y-4 max-w-xl">
-          <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm space-y-3">
+          <div className="rounded-xl border border-slate-200 bg-white p-5 space-y-3">
             <div className="flex items-start gap-3">
               <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-sm font-bold text-slate-700">1</span>
               <div>
@@ -117,16 +117,16 @@ export default function NewClaimPage() {
             <textarea
               id="receipt-text" rows={5} value={text} onChange={(e) => setText(e.target.value)}
               placeholder={"UBER\n12 Aug 2026\nTrip to Airport\n₹320"}
-              className="w-full border rounded px-3 py-2 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
             <button
               onClick={extractText} disabled={busy === "extract" || !text.trim()}
-              className="bg-blue-600 text-white rounded px-4 py-2 text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+              className="h-9 rounded-lg bg-blue-600 px-4 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
             >
               {busy === "extract" ? "Extracting..." : "Extract Claim"}
             </button>
           </div>
-          <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm space-y-4">
+          <div className="rounded-xl border border-slate-200 bg-white p-5 space-y-4">
             <div className="flex items-start gap-3">
               <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-blue-100 text-sm font-bold text-blue-700">2</span>
               <div>
@@ -203,7 +203,7 @@ export default function NewClaimPage() {
           {matches.length > 0 && !override && (
             <div className={`rounded-lg border p-4 ${strong ? "bg-red-50 border-red-300" : "bg-amber-50 border-amber-300"}`}>
               <p className="font-semibold text-sm">Possible duplicate receipt</p>
-              <p className="text-xs text-gray-600 mt-1">We found existing claims that look similar:</p>
+              <p className="text-xs text-slate-600 mt-1">We found existing claims that look similar:</p>
               <ul className="mt-2 space-y-1 text-sm">
                 {matches.slice(0, 3).map((m) => (
                   <li key={m.claim_id} className="flex justify-between">
@@ -219,13 +219,13 @@ export default function NewClaimPage() {
               <div className="mt-3 flex gap-2">
                 <button
                   onClick={() => setOverride(true)}
-                  className="bg-gray-800 text-white rounded px-3 py-1.5 text-xs font-medium hover:bg-gray-900"
+                  className="bg-gray-800 text-white h-8 rounded-lg px-3 text-xs font-semibold hover:bg-gray-900"
                 >
                   Continue Anyway
                 </button>
                 <button
                   onClick={() => setForm(null)}
-                  className="border rounded px-3 py-1.5 text-xs font-medium hover:bg-gray-100"
+                  className="border h-8 rounded-lg px-3 text-xs font-semibold hover:bg-gray-100"
                 >
                   Discard
                 </button>
@@ -233,24 +233,24 @@ export default function NewClaimPage() {
             </div>
           )}
 
-          <div className="bg-white rounded-lg shadow p-4 space-y-3">
-            <p className="text-xs font-semibold text-gray-500 uppercase">Review & edit extracted claim</p>
+          <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Review & edit extracted claim</p>
             <div className="grid grid-cols-2 gap-3">
               <label className="text-sm">
                 <span className="block font-medium mb-1">Merchant</span>
                 <input value={form.merchant} onChange={(e) => setForm({ ...form, merchant: e.target.value })}
-                  className="w-full border rounded px-3 py-2" required />
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" required />
               </label>
               <label className="text-sm">
                 <span className="block font-medium mb-1">Date</span>
                 <input type="date" value={form.transaction_date}
                   onChange={(e) => setForm({ ...form, transaction_date: e.target.value })}
-                  className="w-full border rounded px-3 py-2" required />
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" required />
               </label>
               <label className="text-sm">
                 <span className="block font-medium mb-1">Category</span>
                 <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}
-                  className="w-full border rounded px-3 py-2">
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
                   {CATEGORIES.map((c) => <option key={c}>{c}</option>)}
                 </select>
               </label>
@@ -258,42 +258,42 @@ export default function NewClaimPage() {
                 <span className="block font-medium mb-1">Amount (₹)</span>
                 <input type="number" min="0.01" step="0.01" value={form.amount}
                   onChange={(e) => setForm({ ...form, amount: e.target.value })}
-                  className="w-full border rounded px-3 py-2" required />
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" required />
               </label>
               <label className="text-sm">
                 <span className="block font-medium mb-1">
                   Receipt No.
-                  <span className="block text-xs font-normal text-gray-500">Duplicate checks match on this — type it exactly as printed</span>
+                  <span className="block text-xs font-normal text-slate-500">Duplicate checks match on this — type it exactly as printed</span>
                 </span>
                 <input value={form.receipt_no || ""} onChange={(e) => setForm({ ...form, receipt_no: e.target.value })}
-                  placeholder="e.g. UB984213X" className="w-full border rounded px-3 py-2 font-mono font-medium" />
+                  placeholder="e.g. UB984213X" className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono font-medium" />
               </label>
               <label className="text-sm">
                 <span className="block font-medium mb-1">
                   Time
-                  <span className="block text-xs font-normal text-gray-500">Transaction time (HH:MM or like 2:30 pm)</span>
+                  <span className="block text-xs font-normal text-slate-500">Transaction time (HH:MM or like 2:30 pm)</span>
                 </span>
                 <input value={form.trans_time || ""} onChange={(e) => setForm({ ...form, trans_time: e.target.value })}
-                  placeholder="e.g. 14:22" className="w-full border rounded px-3 py-2 font-mono font-medium" />
+                  placeholder="e.g. 14:22" className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono font-medium" />
               </label>
             </div>
             <label className="text-sm block">
               <span className="block font-medium mb-1">Description</span>
               <input value={form.description || ""} onChange={(e) => setForm({ ...form, description: e.target.value })}
-                className="w-full border rounded px-3 py-2" />
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
             </label>
             <ErrorBox message={error} />
             <div className="flex gap-2 pt-1">
               <button
                 onClick={() => save(false)} disabled={!!busy}
-                className="border rounded px-4 py-2 text-sm font-medium hover:bg-gray-100 disabled:opacity-50"
+                className="inline-flex h-9 items-center rounded-lg border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
               >
                 {busy === "draft" ? "Saving..." : "Save Draft"}
               </button>
               <button
                 onClick={() => save(true)} disabled={!!busy || (matches.length > 0 && !override)}
                 title={matches.length > 0 && !override ? "Acknowledge the duplicate warning first" : undefined}
-                className="bg-blue-600 text-white rounded px-4 py-2 text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+                className="h-9 rounded-lg bg-blue-600 px-4 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
               >
                 {busy === "submit" ? "Submitting..." : "Submit Claim"}
               </button>
